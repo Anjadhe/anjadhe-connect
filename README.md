@@ -51,28 +51,30 @@ npm test                         # end-to-end smoke test on the mock provider
 
 With real keys: put them in `.env` (see `.env.example`), export, `npm start`.
 
-## Deploy (Railway)
+## Run your own
 
-1. New Railway project → deploy from this GitHub repo (`railway.json` sets
-   start command and healthcheck).
+The service is a single Node process with a SQLite file — it runs anywhere
+that gives you a persistent disk. On Railway (what `railway.json` targets):
+
+1. New project → deploy from your fork of this repo (`railway.json` sets
+   the start command and healthcheck).
 2. **Attach a volume** (mount path `/data` is fine — the app uses
-   `RAILWAY_VOLUME_MOUNT_PATH` automatically). Without a volume, every
-   deploy wipes all keys and usage.
+   `RAILWAY_VOLUME_MOUNT_PATH` automatically). Without one, every deploy
+   wipes all keys and usage.
 3. Set service variables: provider keys, `ADMIN_TOKEN`, optionally
-   `PROVIDER_BUDGETS` / quota overrides.
-4. Custom domain: add `api.anjadhe.com` in Railway → copy the CNAME target
-   into Vercel DNS (the anjadhe.com zone). The website and this API never
-   interact.
-5. Back up the volume (Railway volume backups, or a cron that copies
-   `connect.db` out via `sqlite3 .backup`).
+   `PROVIDER_BUDGETS` / quota overrides (see `.env.example`).
+4. Point a domain at it if you want one (CNAME to the service), and back up
+   the volume (`sqlite3 connect.db .backup`, or your host's volume backups).
+
+Then point the Anjadhe app at it with `ANJADHE_CONNECT_URL=https://your.host`.
+Note the license below: self-hosting for yourself is fine; running it as a
+commercial service is not.
 
 ## Roadmap
 
-- **Phase 2 — Stripe**: checkout session + webhook set tiers automatically;
-  Customer Portal for cancel/card changes; email-code linking so one
-  subscription covers a user's other Macs.
-- **Later**: `/v1/relay` (mobile-sync relay), `/v1/llm` (hosted inference,
-  explicit opt-in in the app, never a default).
+- `/v1/relay` — mobile-sync relay.
+- `/v1/llm` — hosted inference; would be an explicit opt-in in the app,
+  never a default.
 
 ## License
 
