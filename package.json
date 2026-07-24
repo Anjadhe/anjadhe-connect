@@ -9,10 +9,10 @@
     "test": "node test/smoke.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": "22.x"
   },
   "dependencies": {
-    "better-sqlite3": "^11.10.0",
+    "better-sqlite3": "^13.0.1",
     "express": "^4.21.2"
   }
 }
