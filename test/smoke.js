@@ -55,6 +55,10 @@ async function main() {
         assert.strictEqual(r.body.upstream, 'mock');
         assert.ok(Array.isArray(r.body.results) && r.body.results.length > 0);
         assert.ok(r.body.results[0].title && r.body.results[0].url);
+        // Freshness hint passes through when the upstream supplies one
+        // (and stays absent when it doesn't).
+        assert.strictEqual(r.body.results[0].age, '2 hours ago');
+        assert.ok(!('age' in r.body.results[1]));
         assert.strictEqual(r.body.used, i);
     }
 
