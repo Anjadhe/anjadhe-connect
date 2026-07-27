@@ -67,6 +67,36 @@ async function main() {
     assert.strictEqual(r.status, 429);
     assert.strictEqual(r.body.code, 'quota');
 
+    // news is unmetered: works even at search quota, and leaves usage alone
+    r = await post('/v1/news', { topics: ['cricket', 'ai'] }, bearer(key1));
+    assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.topics.length, 2);
+    const item = r.body.topics[0].items[0];
+    assert.ok(item.title && item.url && item.source && item.publishedAt);
+    r = await get('/v1/usage', bearer(key1));
+    assert.strictEqual(r.body.used, 3);
+
+    // news requires topics and auth
+    r = await post('/v1/news', { topics: [] }, bearer(key1));
+    assert.strictEqual(r.status, 400);
+    r = await post('/v1/news', { topics: ['x'] });
+    assert.strictEqual(r.status, 401);
+
+    // RSS parser: entity decode, source-suffix strip, pubDate -> ISO
+    const { parseRss } = require('../lib/news');
+    const parsed = parseRss(`<rss><channel>
+        <item><title>Rains hit city &amp; suburbs - The Daily</title>
+        <link>https://d.example/a</link>
+        <pubDate>Sun, 27 Jul 2026 08:00:00 GMT</pubDate>
+        <source url="https://d.example">The Daily</source></item>
+        <item><title><![CDATA[Second story]]></title><link>https://d.example/b</link></item>
+    </channel></rss>`);
+    assert.strictEqual(parsed[0].title, 'Rains hit city & suburbs');
+    assert.strictEqual(parsed[0].source, 'The Daily');
+    assert.ok(parsed[0].publishedAt.startsWith('2026-07-27'));
+    assert.strictEqual(parsed[1].title, 'Second story');
+    assert.strictEqual(parsed[1].publishedAt, null);
+
     // usage reflects it
     r = await get('/v1/usage', bearer(key1));
     assert.strictEqual(r.status, 200);

@@ -66,6 +66,23 @@ function allowMint(ip) {
     return true;
 }
 
+// News fetches are unmetered (server-side topic cache makes them nearly
+// free), so a simple fixed per-minute window is the only brake needed.
+const NEWS_PER_MINUTE = 12;
+const _newsByInstall = new Map(); // installId -> {windowStart, count}
+function allowNewsMinute(installId) {
+    if (_newsByInstall.size > 10000) _newsByInstall.clear();
+    const now = Date.now();
+    const cur = _newsByInstall.get(installId);
+    if (!cur || now - cur.windowStart >= 60000) {
+        _newsByInstall.set(installId, { windowStart: now, count: 1 });
+        return true;
+    }
+    if (cur.count >= NEWS_PER_MINUTE) return false;
+    cur.count++;
+    return true;
+}
+
 const _searchByInstall = new Map(); // installId -> {windowStart, count}
 function allowMinute(installId, tier) {
     if (_searchByInstall.size > 10000) _searchByInstall.clear();
@@ -150,6 +167,29 @@ app.post('/v1/search', auth, async (req, res) => {
     } catch (e) {
         res.status(502).json({ error: e.message || 'Search failed' });
     }
+});
+
+// Current headlines for a batch of user-chosen topics (the Anjadhe app's
+// Discover pane). NOT metered against the search quota — the per-topic
+// cache in lib/news.js means one upstream fetch serves every user
+// following that topic within the window. Topics are never logged.
+app.post('/v1/news', auth, async (req, res) => {
+    const raw = Array.isArray(req.body?.topics) ? req.body.topics : [];
+    const topics = raw.map(t => String(t || '').trim()).filter(t => t && t.length <= 80).slice(0, 8);
+    if (!topics.length) return res.status(400).json({ error: 'topics required (1-8 strings, max 80 chars each)' });
+    if (!allowNewsMinute(req.install.install_id)) {
+        return res.status(429).json({ error: 'Rate limit: too many news requests this minute — retry shortly.', code: 'rate' });
+    }
+    const news = require('./lib/news');
+    const out = await Promise.all(topics.map(async (topic) => {
+        try {
+            return { topic, items: await news.topicNews(topic) };
+        } catch {
+            // Error details stay server-side; they could echo upstream URLs.
+            return { topic, items: [], error: 'unavailable' };
+        }
+    }));
+    res.json({ topics: out, provider: 'anjadhe' });
 });
 
 app.get('/v1/usage', auth, (req, res) => {
