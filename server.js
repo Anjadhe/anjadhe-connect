@@ -136,10 +136,11 @@ app.get('/healthz', (req, res) => {
     res.json({ ok: true, providers: router.available() });
 });
 
-// Mint (or rotate) the key for an installation. The install id is a UUID
-// the app generates locally — unguessable, so returning a fresh key for a
-// known id is safe. Rotation does NOT reset usage (usage keys off the
-// install id), so re-minting can't refill a quota.
+// Mint (or rotate) the key for an installation. Since 2026-07-28 the app
+// sends a random UUID as the install id (unguessable, so returning a fresh
+// key for a known id is safe); ids minted before that are hostname-derived —
+// guessable — which is why /v1/keys/migrate exists. Rotation does NOT reset
+// usage (usage keys off the install id), so re-minting can't refill a quota.
 app.post('/v1/keys', (req, res) => {
     const installId = String(req.body?.installId || '').trim();
     if (!/^[A-Za-z0-9_-]{8,64}$/.test(installId)) {
@@ -156,6 +157,23 @@ app.post('/v1/keys', (req, res) => {
     db.bumpMetric(existing ? 'mint.rotate' : 'mint.new');
     const tier = existing ? existing.tier : 'free';
     res.json({ apiKey: key, tier, monthlyQuota: quotaFor(tier), rotated: !!existing });
+});
+
+// Rename this key's install id — how the app moves off a legacy
+// hostname-derived id onto a random UUID it generated locally. Bearer-auth
+// only: holding the key proves ownership of the install. Tier and usage
+// travel with the rename, so migrating can't refill a quota.
+app.post('/v1/keys/migrate', auth, (req, res) => {
+    const newId = String(req.body?.newInstallId || '').trim();
+    if (!/^[A-Za-z0-9_-]{8,64}$/.test(newId)) {
+        return res.status(400).json({ error: 'newInstallId must be 8-64 chars of letters, digits, - or _' });
+    }
+    const oldId = req.install.install_id;
+    if (newId === oldId) return res.json({ success: true, installId: newId });
+    if (db.getKeyByInstall(newId)) return res.status(409).json({ error: 'newInstallId already in use' });
+    db.migrateInstall(oldId, newId);
+    db.bumpMetric('mint.migrate');
+    res.json({ success: true, installId: newId });
 });
 
 app.post('/v1/search', auth, async (req, res) => {

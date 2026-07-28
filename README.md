@@ -24,6 +24,7 @@ Auth: `Authorization: Bearer anck_…` (except `/v1/keys` and `/healthz`).
 | Endpoint | What it does |
 |---|---|
 | `POST /v1/keys` `{installId}` | Mint (or rotate) the key for an installation. Rotation preserves tier and usage — re-minting can't refill a quota. |
+| `POST /v1/keys/migrate` `{newInstallId}` | Rename this key's install id (tier and usage travel with it) — how the app moves legacy hostname-derived ids onto random UUIDs. |
 | `POST /v1/search` `{query, maxResults?}` | Search. Returns `{results: [{title, url, snippet}], provider: "anjadhe", upstream, used, quota}` — the shape the app's other search providers already use. `429` with `code: "quota"` when the month is spent, `code: "rate"` for per-minute limits. |
 | `GET /v1/usage` | `{tier, used, quota, period, resetsAt}` |
 | `POST /v1/admin/tier` `{installId, tier}` | Manual tier change (header `x-admin-token`). Stripe replaces this in phase 2. |

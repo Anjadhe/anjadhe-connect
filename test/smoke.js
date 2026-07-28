@@ -132,6 +132,23 @@ async function main() {
     assert.strictEqual(r.body.keys, 1);
     assert.strictEqual(r.body.searchesThisPeriod, 4);
 
+    // migrate to a UUID-style install id: tier + usage travel, key keeps working
+    r = await post('/v1/keys/migrate', { newInstallId: 'no' }, bearer(key2));
+    assert.strictEqual(r.status, 400);
+    r = await post('/v1/keys/migrate', { newInstallId: 'uuid-1111-2222-3333' }, bearer(key2));
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.installId, 'uuid-1111-2222-3333');
+    r = await get('/v1/usage', bearer(key2));
+    assert.strictEqual(r.body.used, 4);   // usage moved with the rename
+    assert.strictEqual(r.body.tier, 'plus');
+    // the old id is free again; a new install there can't take the migrated one
+    r = await post('/v1/keys', { installId: 'test-install-0001' });
+    assert.strictEqual(r.body.rotated, false);
+    assert.strictEqual(r.body.tier, 'free');
+    const key3 = r.body.apiKey;
+    r = await post('/v1/keys/migrate', { newInstallId: 'uuid-1111-2222-3333' }, bearer(key3));
+    assert.strictEqual(r.status, 409);
+
     // observability: daily counters, actives, provider status, alerts —
     // all aggregate, nothing per-request
     r = await get('/v1/admin/overview?days=7', { 'x-admin-token': 'test-admin' });
@@ -140,15 +157,16 @@ async function main() {
     for (const row of r.body.metrics) m[row.name] = (m[row.name] || 0) + row.n;
     assert.strictEqual(m['search.ok'], 4);
     assert.strictEqual(m['search.quota'], 1);
-    assert.strictEqual(m['mint.new'], 1);
+    assert.strictEqual(m['mint.new'], 2);    // original + re-mint of the vacated id
     assert.strictEqual(m['mint.rotate'], 1);
+    assert.strictEqual(m['mint.migrate'], 1);
     assert.ok(m['auth.fail'] >= 2); // bad key + rotated-away key
     assert.strictEqual(m['provider.mock.ok'], 4);
     assert.ok(m['search.ms.lt500'] >= 1);
-    assert.strictEqual(r.body.actives.today, 1);
+    assert.strictEqual(r.body.actives.today, 2);
     assert.strictEqual(r.body.providers[0].name, 'mock');
     assert.strictEqual(r.body.providers[0].used, 4);
-    assert.strictEqual(r.body.installs[0].install_id, 'test-install-0001');
+    assert.strictEqual(r.body.installs[0].install_id, 'uuid-1111-2222-3333');
     assert.strictEqual(r.body.installs[0].used, 4);
     assert.ok(r.body.alerts.some(a => a.id === 'quota-hits'));
     // alert text carries service-wide numbers only — never an install id or IP
