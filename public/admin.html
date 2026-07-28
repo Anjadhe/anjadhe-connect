@@ -201,9 +201,8 @@
   <div class="card" id="installs-card">
     <div class="head row" style="justify-content:space-between; margin-bottom:6px">
       <h2 style="margin:0">Installs (top 200 by usage this month)</h2>
-      <button id="reveal-btn">Reveal install ids</button>
     </div>
-    <div class="privacy-note">Install ids can be machine hostnames (personal names) — masked by default. Revealing them only changes this screen.</div>
+    <div class="privacy-note">Install ids are stored as SHA-256 hashes — the service never keeps raw machine identifiers. To find a specific install, match the hash shown in that Mac's Settings &rsaquo; Web Search card. Click an id to copy the full hash.</div>
     <div class="table-wrap" style="max-height:380px"><table class="data-table" id="installs-table"></table></div>
   </div>
 </div>
@@ -216,7 +215,6 @@ const $ = (s, el = document) => el.querySelector(s);
 const TOKEN_KEY = 'anjadhe-admin-token';
 let rangeDays = 30;
 let overview = null;
-let revealed = false;
 
 const fmt = (n) => {
   if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M';
@@ -452,20 +450,13 @@ function renderProviders() {
   }).join('');
 }
 
-// Masked display is a stable hash tag, not a prefix — install ids can be
-// hostnames, and even the first characters of one can be a person's name.
-function maskTag(id) {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < id.length; i++) { h ^= id.charCodeAt(i); h = Math.imul(h, 0x01000193); }
-  return '#' + (h >>> 0).toString(16).padStart(8, '0').slice(0, 6);
-}
-
 function renderInstalls() {
   const quotas = overview.tierQuotas;
   const tiers = Object.keys(quotas);
-  const mask = (id) => revealed ? id : maskTag(id);
+  // Stored ids are SHA-256 hashes (server never keeps the raw id); show a
+  // prefix that matches the hash the app displays in its Settings card.
   const rows = overview.installs.map((k) => `<tr>
-    <td class="install-id" title="${revealed ? '' : 'masked'}">${esc(mask(k.install_id))}</td>
+    <td class="install-id" data-copy="${esc(k.install_id)}" title="click to copy full hash">${esc(k.install_id.slice(0, 12))}…</td>
     <td><select data-install="${esc(k.install_id)}">${tiers.map(t =>
       `<option value="${t}" ${t === k.tier ? 'selected' : ''}>${t}</option>`).join('')}</select></td>
     <td>${fmt(k.used)} / ${fmt(quotas[k.tier] ?? '?')}</td>
@@ -474,6 +465,15 @@ function renderInstalls() {
   </tr>`).join('');
   $('#installs-table').innerHTML =
     `<tr><th>Install</th><th>Tier</th><th>Used / quota</th><th>Created</th><th>Last seen</th></tr>` + rows;
+  $('#installs-table').querySelectorAll('[data-copy]').forEach((td) => {
+    td.style.cursor = 'pointer';
+    td.addEventListener('click', () => {
+      navigator.clipboard.writeText(td.dataset.copy);
+      const orig = td.textContent;
+      td.textContent = 'copied';
+      setTimeout(() => { td.textContent = orig; }, 800);
+    });
+  });
   $('#installs-table').querySelectorAll('select').forEach((sel) => {
     sel.addEventListener('change', async () => {
       try {
@@ -520,12 +520,6 @@ $('#range-buttons').addEventListener('click', (e) => {
   rangeDays = parseInt(btn.dataset.days, 10);
   document.querySelectorAll('#range-buttons button').forEach(b => b.classList.toggle('on', b === btn));
   load();
-});
-
-$('#reveal-btn').addEventListener('click', () => {
-  revealed = !revealed;
-  $('#reveal-btn').textContent = revealed ? 'Mask install ids' : 'Reveal install ids';
-  renderInstalls();
 });
 
 const go = () => {

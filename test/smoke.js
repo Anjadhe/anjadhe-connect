@@ -3,9 +3,12 @@
 // Run: npm test
 'use strict';
 const assert = require('assert');
+const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+
+const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 
 process.env.SEARCH_MOCK = '1';
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'connect-test-'));
@@ -166,13 +169,26 @@ async function main() {
     assert.strictEqual(r.body.actives.today, 2);
     assert.strictEqual(r.body.providers[0].name, 'mock');
     assert.strictEqual(r.body.providers[0].used, 4);
-    assert.strictEqual(r.body.installs[0].install_id, 'uuid-1111-2222-3333');
+    // install ids at rest are SHA-256 hashes of what the client sent — the
+    // raw id (a hostname on legacy installs) is never stored or exposed
+    assert.strictEqual(r.body.installs[0].install_id, sha('uuid-1111-2222-3333'));
     assert.strictEqual(r.body.installs[0].used, 4);
+    for (const k of r.body.installs) {
+        assert.match(k.install_id, /^[0-9a-f]{64}$/);
+        assert.ok(!('mint_ip' in k));
+    }
     assert.ok(r.body.alerts.some(a => a.id === 'quota-hits'));
     // alert text carries service-wide numbers only — never an install id or IP
     for (const a of r.body.alerts) {
         assert.ok(!JSON.stringify(a).includes('test-install-0001'));
     }
+
+    // admin tier accepts the stored hash (what the dashboard sends) as well
+    // as the raw id (tested earlier)
+    r = await post('/v1/admin/tier', { installId: sha('uuid-1111-2222-3333'), tier: 'free' }, { 'x-admin-token': 'test-admin' });
+    assert.strictEqual(r.status, 200);
+    r = await get('/v1/usage', bearer(key2));
+    assert.strictEqual(r.body.tier, 'free');
 
     // the dashboard shell is served (data-free — auth happens per fetch)
     const page = await fetch(base + '/admin');

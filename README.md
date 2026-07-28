@@ -11,11 +11,13 @@ The source is public so the privacy claim below is verifiable.
 ## Privacy
 
 **Query text is never logged and never stored.** The database holds usage
-*counters* keyed by installation id; request logs carry method, path,
-status, and latency only. Searches from all users exit through Connect's
-own upstream accounts and server address, so upstream search providers
-cannot profile individual users — a stronger position than each user
-holding their own provider key.
+*counters* keyed by a SHA-256 hash of the installation id — the raw id
+(which can be a machine hostname on old app versions) is hashed at the API
+boundary and never written to disk, and mint IPs are not stored. Request
+logs carry method, path, status, and latency only. Searches from all users
+exit through Connect's own upstream accounts and server address, so
+upstream search providers cannot profile individual users — a stronger
+position than each user holding their own provider key.
 
 ## API
 
@@ -43,8 +45,8 @@ blocked / failed), key mints, latency buckets, provider budget meters, active
 installs, and an install list for manual tier changes. Everything it shows
 comes from **service-wide daily counters** (`metrics_daily`) plus a
 day-granularity `last_seen_day` per install — no per-request records, no
-query text, no IPs. Install ids (which can be machine hostnames) are masked
-by default.
+query text, no IPs. Install ids appear only in their stored (hashed) form;
+each Mac's Settings card shows the same hash for matching.
 
 Alerts (provider budget nearly spent, all upstreams down, high upstream
 failure rate, mint spikes, installs hitting quota) always appear on the

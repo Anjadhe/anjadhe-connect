@@ -5,8 +5,10 @@
 //
 // PRIVACY INVARIANT (this is the product): query text is never logged and
 // never stored. Request logs carry method/path/status/latency only; SQLite
-// holds counters keyed by install id — nothing about what was searched.
-// Every change to this file must preserve that.
+// holds counters keyed by a SHA-256 HASH of the install id — nothing about
+// what was searched, and no raw machine identifiers (legacy install ids
+// were hostname-derived) or IP addresses at rest. Every change to this
+// file must preserve that.
 'use strict';
 const crypto = require('crypto');
 const path = require('path');
@@ -139,8 +141,9 @@ app.get('/healthz', (req, res) => {
 // Mint (or rotate) the key for an installation. Since 2026-07-28 the app
 // sends a random UUID as the install id (unguessable, so returning a fresh
 // key for a known id is safe); ids minted before that are hostname-derived —
-// guessable — which is why /v1/keys/migrate exists. Rotation does NOT reset
-// usage (usage keys off the install id), so re-minting can't refill a quota.
+// guessable — which is why /v1/keys/migrate exists. The raw id is hashed
+// here at the boundary and never stored. Rotation does NOT reset usage
+// (usage keys off the install id), so re-minting can't refill a quota.
 app.post('/v1/keys', (req, res) => {
     const installId = String(req.body?.installId || '').trim();
     if (!/^[A-Za-z0-9_-]{8,64}$/.test(installId)) {
@@ -150,10 +153,11 @@ app.post('/v1/keys', (req, res) => {
         db.bumpMetric('mint.rate');
         return res.status(429).json({ error: 'Too many key requests from this address today' });
     }
+    const idHash = db.hashInstallId(installId);
     const key = mintKey();
-    const existing = db.getKeyByInstall(installId);
-    if (existing) db.rotateKey(installId, hashKey(key));
-    else db.createKey(installId, hashKey(key), req.ip);
+    const existing = db.getKeyByInstall(idHash);
+    if (existing) db.rotateKey(idHash, hashKey(key));
+    else db.createKey(idHash, hashKey(key));
     db.bumpMetric(existing ? 'mint.rotate' : 'mint.new');
     const tier = existing ? existing.tier : 'free';
     res.json({ apiKey: key, tier, monthlyQuota: quotaFor(tier), rotated: !!existing });
@@ -168,10 +172,11 @@ app.post('/v1/keys/migrate', auth, (req, res) => {
     if (!/^[A-Za-z0-9_-]{8,64}$/.test(newId)) {
         return res.status(400).json({ error: 'newInstallId must be 8-64 chars of letters, digits, - or _' });
     }
-    const oldId = req.install.install_id;
-    if (newId === oldId) return res.json({ success: true, installId: newId });
-    if (db.getKeyByInstall(newId)) return res.status(409).json({ error: 'newInstallId already in use' });
-    db.migrateInstall(oldId, newId);
+    const newHash = db.hashInstallId(newId);
+    const oldHash = req.install.install_id; // stored form is already the hash
+    if (newHash === oldHash) return res.json({ success: true, installId: newId });
+    if (db.getKeyByInstall(newHash)) return res.status(409).json({ error: 'newInstallId already in use' });
+    db.migrateInstall(oldHash, newHash);
     db.bumpMetric('mint.migrate');
     res.json({ success: true, installId: newId });
 });
@@ -264,9 +269,12 @@ app.post('/v1/admin/tier', adminAuth, (req, res) => {
     if (!(tier in config.tierQuotas)) {
         return res.status(400).json({ error: `Unknown tier — one of: ${Object.keys(config.tierQuotas).join(', ')}` });
     }
-    if (!db.getKeyByInstall(installId)) return res.status(404).json({ error: 'Unknown installId' });
-    db.setTier(installId, tier);
-    res.json({ success: true, installId, tier, monthlyQuota: quotaFor(tier) });
+    // Accept either the stored (hashed) id — what the dashboard shows — or a
+    // raw install id read off a user's Settings card.
+    const stored = db.getKeyByInstall(installId) ? installId : db.hashInstallId(installId);
+    if (!db.getKeyByInstall(stored)) return res.status(404).json({ error: 'Unknown installId' });
+    db.setTier(stored, tier);
+    res.json({ success: true, installId: stored, tier, monthlyQuota: quotaFor(tier) });
 });
 
 app.get('/v1/admin/stats', adminAuth, (req, res) => {
