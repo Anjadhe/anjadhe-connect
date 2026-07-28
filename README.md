@@ -28,10 +28,29 @@ Auth: `Authorization: Bearer anck_…` (except `/v1/keys` and `/healthz`).
 | `GET /v1/usage` | `{tier, used, quota, period, resetsAt}` |
 | `POST /v1/admin/tier` `{installId, tier}` | Manual tier change (header `x-admin-token`). Stripe replaces this in phase 2. |
 | `GET /v1/admin/stats` | Key counts, per-tier counts, this month's usage. |
+| `GET /v1/admin/overview?days=N` | Everything the `/admin` dashboard shows: daily counters, active installs, provider status, alerts, install list. |
+| `GET /admin` | Operator dashboard (browser page; enter `ADMIN_TOKEN` in the page). |
 | `GET /healthz` | `{ok, providers}` |
 
 Tiers (defaults, env-tunable): `free` 300 searches/mo, `plus` 3,000,
 `pro` 15,000, with per-minute caps of 20/60/120.
+
+## Observability & alerts
+
+`/admin` is a single-page operator dashboard: searches per day (served /
+blocked / failed), key mints, latency buckets, provider budget meters, active
+installs, and an install list for manual tier changes. Everything it shows
+comes from **service-wide daily counters** (`metrics_daily`) plus a
+day-granularity `last_seen_day` per install — no per-request records, no
+query text, no IPs. Install ids (which can be machine hostnames) are masked
+by default.
+
+Alerts (provider budget nearly spent, all upstreams down, high upstream
+failure rate, mint spikes, installs hitting quota) always appear on the
+dashboard. Set `ALERT_WEBHOOK_URL` (Slack/Discord webhook or an ntfy.sh
+topic; `ALERT_WEBHOOK_KIND` picks the payload shape) to also get pushed
+notifications, checked every 10 minutes and re-sent at most every
+`ALERT_RESEND_HOURS`. Alert text carries service-wide numbers only.
 
 ## How routing works
 

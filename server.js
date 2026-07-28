@@ -9,10 +9,12 @@
 // Every change to this file must preserve that.
 'use strict';
 const crypto = require('crypto');
+const path = require('path');
 const express = require('express');
 const config = require('./lib/config');
 const db = require('./lib/db');
 const router = require('./lib/router');
+const alerts = require('./lib/alerts');
 
 const KEY_PREFIX = 'anck_';
 
@@ -102,16 +104,29 @@ function allowMinute(installId, tier) {
 
 function auth(req, res, next) {
     const m = /^Bearer (anck_[a-f0-9]{48})$/.exec(req.get('authorization') || '');
-    if (!m) return res.status(401).json({ error: 'Missing or malformed API key' });
+    if (!m) {
+        db.bumpMetric('auth.fail');
+        return res.status(401).json({ error: 'Missing or malformed API key' });
+    }
     const row = db.getKeyByHash(hashKey(m[1]));
-    if (!row) return res.status(401).json({ error: 'Unknown API key' });
+    if (!row) {
+        db.bumpMetric('auth.fail');
+        return res.status(401).json({ error: 'Unknown API key' });
+    }
+    // Day-granularity activity marker (drives the dashboard's active-install
+    // counts). Deliberately never a timestamp.
+    if (row.last_seen_day !== db.day()) db.touchSeen(row.install_id);
     req.install = row;
     next();
 }
 
 function adminAuth(req, res, next) {
     if (!config.adminToken) return res.status(503).json({ error: 'Admin endpoints disabled (no ADMIN_TOKEN set)' });
-    if (req.get('x-admin-token') !== config.adminToken) return res.status(401).json({ error: 'Bad admin token' });
+    const given = Buffer.from(req.get('x-admin-token') || '');
+    const want = Buffer.from(config.adminToken);
+    if (given.length !== want.length || !crypto.timingSafeEqual(given, want)) {
+        return res.status(401).json({ error: 'Bad admin token' });
+    }
     next();
 }
 
@@ -131,12 +146,14 @@ app.post('/v1/keys', (req, res) => {
         return res.status(400).json({ error: 'installId must be 8-64 chars of letters, digits, - or _' });
     }
     if (!allowMint(req.ip)) {
+        db.bumpMetric('mint.rate');
         return res.status(429).json({ error: 'Too many key requests from this address today' });
     }
     const key = mintKey();
     const existing = db.getKeyByInstall(installId);
     if (existing) db.rotateKey(installId, hashKey(key));
     else db.createKey(installId, hashKey(key), req.ip);
+    db.bumpMetric(existing ? 'mint.rotate' : 'mint.new');
     const tier = existing ? existing.tier : 'free';
     res.json({ apiKey: key, tier, monthlyQuota: quotaFor(tier), rotated: !!existing });
 });
@@ -151,23 +168,38 @@ app.post('/v1/search', auth, async (req, res) => {
     const quota = quotaFor(tier);
     const used = db.getUsed(installId);
     if (used >= quota) {
+        db.bumpMetric('search.quota');
         return res.status(429).json({
             error: `Monthly quota reached (${quota} searches on the ${tier} plan). Resets ${resetsAt()}.`,
             code: 'quota', used, quota, resetsAt: resetsAt()
         });
     }
     if (!allowMinute(installId, tier)) {
+        db.bumpMetric('search.rate');
         return res.status(429).json({ error: 'Rate limit: too many searches this minute — retry shortly.', code: 'rate' });
     }
 
+    const start = Date.now();
     try {
         const { results, upstream } = await router.search(query, maxResults);
         db.bumpUsage(installId);
+        db.bumpMetric('search.ok');
+        db.bumpMetric(latencyBucket(Date.now() - start));
         res.json({ results, provider: 'anjadhe', upstream, used: used + 1, quota });
     } catch (e) {
+        db.bumpMetric('search.upstream_fail');
         res.status(502).json({ error: e.message || 'Search failed' });
     }
 });
+
+// Coarse latency histogram for successful searches — daily counters, no
+// per-request records.
+function latencyBucket(ms) {
+    if (ms < 500) return 'search.ms.lt500';
+    if (ms < 1500) return 'search.ms.lt1500';
+    if (ms < 4000) return 'search.ms.lt4000';
+    return 'search.ms.gte4000';
+}
 
 // Current headlines for a batch of user-chosen topics (the Anjadhe app's
 // Discover pane). NOT metered against the search quota — the per-topic
@@ -178,8 +210,10 @@ app.post('/v1/news', auth, async (req, res) => {
     const topics = raw.map(t => String(t || '').trim()).filter(t => t && t.length <= 80).slice(0, 8);
     if (!topics.length) return res.status(400).json({ error: 'topics required (1-8 strings, max 80 chars each)' });
     if (!allowNewsMinute(req.install.install_id)) {
+        db.bumpMetric('news.rate');
         return res.status(429).json({ error: 'Rate limit: too many news requests this minute — retry shortly.', code: 'rate' });
     }
+    db.bumpMetric('news.ok');
     const news = require('./lib/news');
     const out = await Promise.all(topics.map(async (topic) => {
         try {
@@ -221,12 +255,41 @@ app.get('/v1/admin/stats', adminAuth, (req, res) => {
     res.json(db.stats());
 });
 
+// Everything the /admin dashboard renders, in one call. Metrics are
+// service-wide daily counters; the install list is the operator view needed
+// for manual tier changes (install ids + counts, never IPs or content).
+app.get('/v1/admin/overview', adminAuth, (req, res) => {
+    const days = Math.max(1, Math.min(90, parseInt(req.query.days, 10) || 30));
+    res.json({
+        ...db.stats(),
+        day: db.day(),
+        metrics: db.metricsSince(db.daysAgo(days - 1)),
+        actives: db.actives(),
+        providers: router.statusSnapshot(),
+        tierQuotas: config.tierQuotas,
+        installs: db.installList(200),
+        alerts: alerts.evaluate(),
+        webhookConfigured: !!config.alertWebhookUrl
+    });
+});
+
+// The dashboard shell. Serving it without auth is fine — it contains no
+// data (this repo is public anyway); every data fetch it makes goes through
+// adminAuth with the token the operator enters in the page.
+app.get('/admin', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'admin.html'));
+});
+
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 
 if (require.main === module) {
     app.listen(config.port, () => {
         console.log(`anjadhe-connect listening on :${config.port} — providers: ${router.available().join(', ') || 'NONE CONFIGURED'}`);
     });
+    if (config.alertWebhookUrl) {
+        setInterval(() => alerts.checkAndNotify(), 10 * 60 * 1000).unref();
+        alerts.checkAndNotify();
+    }
 }
 
 module.exports = app;

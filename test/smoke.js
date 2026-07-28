@@ -132,6 +132,35 @@ async function main() {
     assert.strictEqual(r.body.keys, 1);
     assert.strictEqual(r.body.searchesThisPeriod, 4);
 
+    // observability: daily counters, actives, provider status, alerts —
+    // all aggregate, nothing per-request
+    r = await get('/v1/admin/overview?days=7', { 'x-admin-token': 'test-admin' });
+    assert.strictEqual(r.status, 200);
+    const m = {};
+    for (const row of r.body.metrics) m[row.name] = (m[row.name] || 0) + row.n;
+    assert.strictEqual(m['search.ok'], 4);
+    assert.strictEqual(m['search.quota'], 1);
+    assert.strictEqual(m['mint.new'], 1);
+    assert.strictEqual(m['mint.rotate'], 1);
+    assert.ok(m['auth.fail'] >= 2); // bad key + rotated-away key
+    assert.strictEqual(m['provider.mock.ok'], 4);
+    assert.ok(m['search.ms.lt500'] >= 1);
+    assert.strictEqual(r.body.actives.today, 1);
+    assert.strictEqual(r.body.providers[0].name, 'mock');
+    assert.strictEqual(r.body.providers[0].used, 4);
+    assert.strictEqual(r.body.installs[0].install_id, 'test-install-0001');
+    assert.strictEqual(r.body.installs[0].used, 4);
+    assert.ok(r.body.alerts.some(a => a.id === 'quota-hits'));
+    // alert text carries service-wide numbers only — never an install id or IP
+    for (const a of r.body.alerts) {
+        assert.ok(!JSON.stringify(a).includes('test-install-0001'));
+    }
+
+    // the dashboard shell is served (data-free — auth happens per fetch)
+    const page = await fetch(base + '/admin');
+    assert.strictEqual(page.status, 200);
+    assert.ok((await page.text()).includes('Anjadhe Connect'));
+
     srv.close();
     console.log('smoke: all assertions passed');
 }
