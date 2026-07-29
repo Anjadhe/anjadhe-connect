@@ -16,10 +16,13 @@ process.env.ADMIN_TOKEN = 'test-admin';
 process.env.TIER_QUOTAS = '{"free":3,"plus":5}';
 
 const app = require('../server');
+const relay = require('../lib/relay');
 
 async function main() {
     const srv = app.listen(0);
+    relay.attach(srv);
     const base = `http://127.0.0.1:${srv.address().port}`;
+    const wsBase = `ws://127.0.0.1:${srv.address().port}`;
     const j = async (res) => ({ status: res.status, body: await res.json() });
     const post = (p, body, headers = {}) => fetch(base + p, {
         method: 'POST',
@@ -229,6 +232,69 @@ async function main() {
     assert.strictEqual(r.status, 200);
     r = await get('/v1/usage', bearer(key2));
     assert.strictEqual(r.body.tier, 'free');
+
+    // ── relay: hello/welcome, bidirectional forwarding, host-state ──────
+    // Plain HTTP on the relay path is a client mistake
+    r = await fetch(base + '/v1/relay/some-routing-id').then(j);
+    assert.strictEqual(r.status, 426);
+
+    // Every message is queued as it arrives, so asserts can't race the relay.
+    const wsOpen = (path) => new Promise((res, rej) => {
+        const ws = new WebSocket(wsBase + path);
+        ws.inbox = [];
+        ws.waiters = [];
+        ws.addEventListener('message', (ev) => {
+            const msg = JSON.parse(ev.data);
+            const w = ws.waiters.shift();
+            if (w) w(msg); else ws.inbox.push(msg);
+        });
+        ws.addEventListener('open', () => res(ws));
+        ws.addEventListener('error', () => rej(new Error('ws connect failed: ' + path)));
+    });
+    const recv = (ws) => ws.inbox.length
+        ? Promise.resolve(ws.inbox.shift())
+        : new Promise((res, rej) => {
+            ws.waiters.push(res);
+            setTimeout(() => rej(new Error('relay recv timeout')), 5000).unref();
+        });
+    const ROUTING = 'smoke-routing-id';
+
+    const host = await wsOpen('/v1/relay/' + ROUTING);
+    host.send(JSON.stringify({ t: 'hello', routingId: ROUTING, role: 'host' }));
+    assert.strictEqual((await recv(host)).t, 'welcome');
+
+    const phone = await wsOpen('/v1/relay/' + ROUTING);
+    phone.send(JSON.stringify({ t: 'hello', routingId: ROUTING, role: 'client' }));
+    const welcome = await recv(phone);
+    assert.strictEqual(welcome.t, 'welcome');
+    assert.match(welcome.clientId, /^[0-9a-f]{16}$/);
+    assert.deepStrictEqual(await recv(phone), { t: 'host-state', online: true });
+    assert.deepStrictEqual(await recv(host), { t: 'peer-join', clientId: welcome.clientId });
+
+    // phone -> host carries from; host -> phone routes by clientId
+    phone.send(JSON.stringify({ t: 'data', payload: 'deadbeef' }));
+    assert.deepStrictEqual(await recv(host), { t: 'data', from: welcome.clientId, payload: 'deadbeef' });
+    host.send(JSON.stringify({ t: 'data', to: welcome.clientId, payload: 'cafef00d' }));
+    assert.deepStrictEqual(await recv(phone), { t: 'data', payload: 'cafef00d' });
+
+    // a big-but-legal frame (chunk-sized) forwards intact
+    const bigPayload = 'ab'.repeat(450_000); // 900k chars, under the 1 MiB frame cap
+    host.send(JSON.stringify({ t: 'data', to: welcome.clientId, payload: bigPayload }));
+    assert.strictEqual((await recv(phone)).payload, bigPayload);
+
+    // host drop notifies the phone
+    host.close();
+    assert.deepStrictEqual(await recv(phone), { t: 'host-state', online: false });
+    phone.close();
+
+    // bad hello is rejected
+    const bad = await wsOpen('/v1/relay/x');
+    bad.send(JSON.stringify({ t: 'hello', routingId: 'x', role: 'admin' }));
+    assert.strictEqual((await recv(bad)).t, 'error');
+    bad.close();
+
+    // non-relay upgrade path is refused
+    await assert.rejects(wsOpen('/v1/search'));
 
     // the dashboard shell is served (data-free — auth happens per fetch)
     const page = await fetch(base + '/admin');

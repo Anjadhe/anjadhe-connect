@@ -3,9 +3,10 @@
 Hosted services for the [Anjadhe app](https://anjadhe.com), served from
 `api.anjadhe.com`. First capability: a metered **web-search API** so the
 in-app assistant gets web access instantly — no signup, no key-hunting.
-Also hosts the app's **opt-in usage analytics** ingest (see below).
-Future capabilities (mobile-sync relay, hosted LLM inference) join as new
-`/v1/*` routes on the same key/tier machinery.
+Also hosts the app's **opt-in usage analytics** ingest and the
+**zero-knowledge mobile-sync relay** (both below). Future capabilities
+(hosted LLM inference) join as new `/v1/*` routes on the same key/tier
+machinery.
 
 The source is public so the privacy claim below is verifiable.
 
@@ -28,6 +29,16 @@ than a UTC day. The analytics install id is a separate random UUID from
 the Connect key's install id, hashed at rest like everything else, so
 app-usage counters can never be joined against a machine's search usage.
 
+The relay (`/v1/relay/<routingId>`, WebSocket) is a zero-knowledge
+rendezvous: a user's Mac dials out and holds a connection; their phone
+connects with the same opaque routing id; the relay forwards frames
+between them. Payloads are end-to-end encrypted with a Noise session
+established directly between the Mac and the phone — the relay never
+holds a key and never inspects a payload, only the tiny routing envelope.
+Routing ids exist in process memory only; nothing about a room is ever
+written to the database or logs. Like analytics, the relay is keyless by
+design, so relay activity can't be joined against search usage either.
+
 ## API
 
 Auth: `Authorization: Bearer anck_…` (except `/v1/keys`, `/v1/analytics/events`, and `/healthz`).
@@ -39,6 +50,7 @@ Auth: `Authorization: Bearer anck_…` (except `/v1/keys`, `/v1/analytics/events
 | `POST /v1/search` `{query, maxResults?}` | Search. Returns `{results: [{title, url, snippet}], provider: "anjadhe", upstream, used, quota}` — the shape the app's other search providers already use. `429` with `code: "quota"` when the month is spent, `code: "rate"` for per-minute limits. |
 | `GET /v1/usage` | `{tier, used, quota, period, resetsAt}` |
 | `POST /v1/analytics/events` `{installId, events}` | Opt-in app-analytics ingest (keyless — see Privacy). Events outside the vocabulary are dropped; the batch is aggregated into daily counters on arrival. Returns `{accepted, dropped}`. |
+| `wss://…/v1/relay/<routingId>` | Zero-knowledge mobile-sync relay (WebSocket, keyless — see Privacy). Frames are capped at 1 MiB; the app's channel layer chunks larger payloads. Per-IP connect limits and per-connection forwarding budgets apply. |
 | `POST /v1/admin/tier` `{installId, tier}` | Manual tier change (header `x-admin-token`). Stripe replaces this in phase 2. |
 | `GET /v1/admin/stats` | Key counts, per-tier counts, this month's usage. |
 | `GET /v1/admin/overview?days=N` | Everything the `/admin` dashboard shows: daily counters, active installs, provider status, alerts, install list. |

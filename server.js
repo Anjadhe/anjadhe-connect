@@ -17,6 +17,7 @@ const config = require('./lib/config');
 const db = require('./lib/db');
 const router = require('./lib/router');
 const alerts = require('./lib/alerts');
+const relay = require('./lib/relay');
 
 const KEY_PREFIX = 'anck_';
 
@@ -363,6 +364,13 @@ app.post('/v1/analytics/events', (req, res) => {
     res.json({ accepted, dropped: raw.length - accepted });
 });
 
+// The relay speaks WebSocket only — connections arrive via the HTTP
+// server's `upgrade` event (see relay.attach in the listen block), never
+// through Express. A plain GET here is a client mistake.
+app.all(['/v1/relay', '/v1/relay/*'], (req, res) => {
+    res.status(426).json({ error: 'WebSocket upgrade required' });
+});
+
 app.get('/v1/usage', auth, (req, res) => {
     const { install_id: installId, tier } = req.install;
     res.json({
@@ -411,6 +419,7 @@ app.get('/v1/admin/overview', adminAuth, (req, res) => {
             actives: db.analyticsActives()
         },
         providers: router.statusSnapshot(),
+        relay: relay.stats(),
         tierQuotas: config.tierQuotas,
         installs: db.installList(200),
         alerts: alerts.evaluate(),
@@ -428,9 +437,10 @@ app.get('/admin', (req, res) => {
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 
 if (require.main === module) {
-    app.listen(config.port, () => {
+    const server = app.listen(config.port, () => {
         console.log(`anjadhe-connect listening on :${config.port} — providers: ${router.available().join(', ') || 'NONE CONFIGURED'}`);
     });
+    relay.attach(server);
     if (config.alertWebhookUrl) {
         setInterval(() => alerts.checkAndNotify(), 10 * 60 * 1000).unref();
         alerts.checkAndNotify();
