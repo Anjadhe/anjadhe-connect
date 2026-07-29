@@ -196,6 +196,13 @@
       <div class="head"><h2>Upstream providers (this month)</h2></div>
       <div id="providers"></div>
     </div>
+    <div class="card chart-card" id="card-analytics">
+      <div class="head"><h2>App events per day (opt-in analytics)</h2><button data-toggle="analytics">table</button></div>
+      <div class="legend">
+        <span><i style="background:var(--series-1)"></i>events</span>
+      </div>
+      <div class="plot"></div><div class="table-wrap hidden"></div>
+    </div>
   </div>
 
   <div class="card" id="installs-card">
@@ -281,6 +288,7 @@ function render() {
   renderMints(byDay);
   renderLatency(byDay);
   renderProviders();
+  renderAnalytics();
   renderInstalls();
 }
 
@@ -311,7 +319,8 @@ function renderTiles(byDay) {
     { label: 'Active installs today', value: fmt(overview.actives.today), note: `${fmt(overview.actives.last7d)} in 7d · ${fmt(overview.actives.last30d)} in 30d` },
     { label: 'Total installs', value: fmt(overview.keys), note: overview.tiers.map(t => `${t.n} ${t.tier}`).join(' · ') },
     { label: 'Blocked today', value: fmt(val(byDay, today, 'search.quota') + val(byDay, today, 'search.rate')), note: 'quota + rate limits' },
-    { label: 'Upstream fail rate today', value: failRate, note: `${fmt(provFail)} of ${fmt(provOk + provFail)} calls` }
+    { label: 'Upstream fail rate today', value: failRate, note: `${fmt(provFail)} of ${fmt(provOk + provFail)} calls` },
+    { label: 'Analytics installs (7d)', value: fmt(overview.analytics?.actives?.last7d ?? 0), note: 'opt-in app analytics' }
   ];
   $('#tiles').innerHTML = tiles.map(t =>
     `<div class="tile"><div class="label">${t.label}</div><div class="value">${t.value}</div>${t.note ? `<div class="note">${t.note}</div>` : ''}</div>`
@@ -448,6 +457,18 @@ function renderProviders() {
       </div>
     </div>`;
   }).join('');
+}
+
+// Opt-in app analytics: daily totals as columns; the table view lists the
+// top event counters (props are folded into the name, e.g. app.opened|app=email).
+function renderAnalytics() {
+  const a = overview.analytics || { daily: [], top: [], actives: {} };
+  const byDay = {};
+  for (const { day, n } of a.daily) byDay[day] = { 'analytics.total': n };
+  columnChart($('#card-analytics .plot'), dayList(),
+    [{ name: 'analytics.total', label: 'events', color: 'var(--series-1)' }], byDay);
+  dataTable($('#card-analytics .table-wrap'), ['Event', 'Count'],
+    a.top.map(t => [t.name, fmt(t.n)]));
 }
 
 function renderInstalls() {

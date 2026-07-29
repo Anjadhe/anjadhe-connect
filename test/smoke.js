@@ -152,6 +152,46 @@ async function main() {
     r = await post('/v1/keys/migrate', { newInstallId: 'uuid-1111-2222-3333' }, bearer(key3));
     assert.strictEqual(r.status, 409);
 
+    // ── app analytics: keyless, vocabulary-bound, aggregated on ingest ──
+    r = await post('/v1/analytics/events', { installId: 'no', events: [] });
+    assert.strictEqual(r.status, 400);
+    const now = Date.now();
+    const fiveDaysAgo = now - 5 * 86400000;
+    r = await post('/v1/analytics/events', {
+        installId: 'analytics-uuid-0001',
+        generatedAt: now,
+        events: [
+            { name: 'app.opened', ts: now, props: { app: 'email' } },
+            { name: 'app.opened', ts: now, props: { app: 'email' } },
+            { name: 'app.opened', ts: fiveDaysAgo, props: { app: 'notes' } },
+            { name: 'agent.query.sent', ts: now, props: { model: 'qwen3:14b', junk: 'dropped' } },
+            { name: 'schedule.task_completed', ts: now - 400 * 86400000 },  // ancient ts → today
+            { name: 'not.in.vocabulary', ts: now },                          // dropped
+            { name: 'app.opened', ts: now, props: { app: 'x|y&z' } }         // value sanitized
+        ]
+    });
+    assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.body.accepted, 6);
+    assert.strictEqual(r.body.dropped, 1);
+
+    r = await get('/v1/admin/overview?days=7', { 'x-admin-token': 'test-admin' });
+    const an = r.body.analytics;
+    assert.strictEqual(an.daily.reduce((s, d) => s + d.n, 0), 6);
+    assert.strictEqual(an.daily.length, 2); // today + the 5-days-ago bucket
+    const top = Object.fromEntries(an.top.map(t => [t.name, t.n]));
+    assert.strictEqual(top['app.opened|app=email'], 2);
+    assert.strictEqual(top['app.opened|app=notes'], 1);
+    assert.strictEqual(top['agent.query.sent|model=qwen3:14b'], 1); // junk prop dropped
+    assert.strictEqual(top['schedule.task_completed'], 1);
+    assert.strictEqual(top['app.opened|app=x_y_z'], 1);
+    assert.ok(!('not.in.vocabulary' in top));
+    assert.strictEqual(an.actives.today, 1);
+
+    // CORS preflight (the app posts from the Electron renderer)
+    const pre = await fetch(base + '/v1/analytics/events', { method: 'OPTIONS' });
+    assert.strictEqual(pre.status, 204);
+    assert.strictEqual(pre.headers.get('access-control-allow-origin'), '*');
+
     // observability: daily counters, actives, provider status, alerts —
     // all aggregate, nothing per-request
     r = await get('/v1/admin/overview?days=7', { 'x-admin-token': 'test-admin' });

@@ -3,6 +3,7 @@
 Hosted services for the [Anjadhe app](https://anjadhe.com), served from
 `api.anjadhe.com`. First capability: a metered **web-search API** so the
 in-app assistant gets web access instantly — no signup, no key-hunting.
+Also hosts the app's **opt-in usage analytics** ingest (see below).
 Future capabilities (mobile-sync relay, hosted LLM inference) join as new
 `/v1/*` routes on the same key/tier machinery.
 
@@ -19,9 +20,17 @@ exit through Connect's own upstream accounts and server address, so
 upstream search providers cannot profile individual users — a stronger
 position than each user holding their own provider key.
 
+App analytics (`/v1/analytics/events`) follow the same discipline: the
+feature is off by default in the app, event names are checked against a
+fixed allowlist on both ends, and the server folds each batch into
+per-day counters at the boundary — no raw event rows, no timestamps finer
+than a UTC day. The analytics install id is a separate random UUID from
+the Connect key's install id, hashed at rest like everything else, so
+app-usage counters can never be joined against a machine's search usage.
+
 ## API
 
-Auth: `Authorization: Bearer anck_…` (except `/v1/keys` and `/healthz`).
+Auth: `Authorization: Bearer anck_…` (except `/v1/keys`, `/v1/analytics/events`, and `/healthz`).
 
 | Endpoint | What it does |
 |---|---|
@@ -29,6 +38,7 @@ Auth: `Authorization: Bearer anck_…` (except `/v1/keys` and `/healthz`).
 | `POST /v1/keys/migrate` `{newInstallId}` | Rename this key's install id (tier and usage travel with it) — how the app moves legacy hostname-derived ids onto random UUIDs. |
 | `POST /v1/search` `{query, maxResults?}` | Search. Returns `{results: [{title, url, snippet}], provider: "anjadhe", upstream, used, quota}` — the shape the app's other search providers already use. `429` with `code: "quota"` when the month is spent, `code: "rate"` for per-minute limits. |
 | `GET /v1/usage` | `{tier, used, quota, period, resetsAt}` |
+| `POST /v1/analytics/events` `{installId, events}` | Opt-in app-analytics ingest (keyless — see Privacy). Events outside the vocabulary are dropped; the batch is aggregated into daily counters on arrival. Returns `{accepted, dropped}`. |
 | `POST /v1/admin/tier` `{installId, tier}` | Manual tier change (header `x-admin-token`). Stripe replaces this in phase 2. |
 | `GET /v1/admin/stats` | Key counts, per-tier counts, this month's usage. |
 | `GET /v1/admin/overview?days=N` | Everything the `/admin` dashboard shows: daily counters, active installs, provider status, alerts, install list. |

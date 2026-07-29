@@ -22,7 +22,12 @@ const KEY_PREFIX = 'anck_';
 
 const app = express();
 app.set('trust proxy', 1); // Railway terminates TLS in front of us
-app.use(express.json({ limit: '10kb' }));
+// Analytics batches (up to 500 queued events from an offline machine) need
+// more room than every other body; keep the tight cap for the rest.
+const jsonBody = express.json({ limit: '10kb' });
+const jsonBodyAnalytics = express.json({ limit: '64kb' });
+app.use((req, res, next) =>
+    (req.path === '/v1/analytics/events' ? jsonBodyAnalytics : jsonBody)(req, res, next));
 
 // Request log: path only — request bodies (queries) never appear here.
 app.use((req, res, next) => {
@@ -83,6 +88,24 @@ function allowNewsMinute(installId) {
         return true;
     }
     if (cur.count >= NEWS_PER_MINUTE) return false;
+    cur.count++;
+    return true;
+}
+
+// Analytics ingest is keyless (see the route for why), so the brake is
+// per-IP. Clients batch and post at most hourly; 10/min absorbs a NAT'd
+// office without opening a flood door.
+const ANALYTICS_PER_MINUTE = 10;
+const _analyticsByIp = new Map(); // ip -> {windowStart, count}
+function allowAnalyticsMinute(ip) {
+    if (_analyticsByIp.size > 10000) _analyticsByIp.clear();
+    const now = Date.now();
+    const cur = _analyticsByIp.get(ip);
+    if (!cur || now - cur.windowStart >= 60000) {
+        _analyticsByIp.set(ip, { windowStart: now, count: 1 });
+        return true;
+    }
+    if (cur.count >= ANALYTICS_PER_MINUTE) return false;
     cur.count++;
     return true;
 }
@@ -249,6 +272,97 @@ app.post('/v1/news', auth, async (req, res) => {
     res.json({ topics: out, provider: 'anjadhe' });
 });
 
+// ── App analytics (opt-in, content-free) ────────────────────────────────
+// Ingest for the desktop app's AnalyticsManager (Settings › Privacy, off by
+// default) — replaces the old anjadhe-analytics Cloudflare Worker. Three
+// deliberate properties:
+//   1. Keyless, and keyed by a SEPARATE per-machine analytics UUID — never
+//      the Connect install id or an anck_ key — so app-usage counters can't
+//      be joined against a machine's search usage.
+//   2. Vocabulary-bound: event names outside the allowlist are dropped, so
+//      a typo'd or rogue event can't smuggle content in.
+//   3. Aggregated at the boundary into per-UTC-day counters (props folded
+//      into the counter name). No raw event rows, no timestamps finer than
+//      a day, and the analytics id is stored only as a SHA-256 hash.
+// Must stay in lockstep with AnalyticsManager.VOCABULARY in the app.
+const ANALYTICS_VOCABULARY = {
+    'app.opened': ['app'],
+    'email.analyzed': ['result', 'model'],
+    'email.action_synced': [],
+    'agent.query.sent': ['model'],
+    'agent.reply.feedback': ['rating'],
+    'goal.status_updated': [],
+    'schedule.task_completed': [],
+    'journal.entry_written': [],
+    'settings.analytics_enabled': [],
+    'settings.analytics_disabled': []
+};
+const ANALYTICS_MAX_BATCH = 500; // matches the client's MAX_EVENTS buffer
+
+// The app posts from the renderer, where CORS applies (the old Worker sent
+// these same headers). Wide-open is fine: the endpoint only accepts counts.
+function analyticsCors(res) {
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.set('Access-Control-Allow-Headers', 'Content-Type');
+    res.set('Access-Control-Max-Age', '86400');
+}
+
+app.options('/v1/analytics/events', (req, res) => {
+    analyticsCors(res);
+    res.sendStatus(204);
+});
+
+app.post('/v1/analytics/events', (req, res) => {
+    analyticsCors(res);
+    const installId = String(req.body?.installId || '').trim();
+    if (!/^[A-Za-z0-9_-]{8,64}$/.test(installId)) {
+        db.bumpMetric('analytics.reject');
+        return res.status(400).json({ error: 'installId must be 8-64 chars of letters, digits, - or _' });
+    }
+    if (!allowAnalyticsMinute(req.ip)) {
+        db.bumpMetric('analytics.rate');
+        return res.status(429).json({ error: 'Rate limit: too many analytics posts this minute — retry later.', code: 'rate' });
+    }
+    const raw = Array.isArray(req.body?.events) ? req.body.events : [];
+    const batch = raw.slice(0, ANALYTICS_MAX_BATCH);
+
+    // Fold the batch into (day, counterName) counts. A client timestamp only
+    // picks the day bucket, and only within the last 30 days — anything
+    // else (missing, future, ancient, forged) lands on today.
+    const today = db.day();
+    const oldest = db.daysAgo(30);
+    const counts = new Map();
+    let accepted = 0;
+    for (const ev of batch) {
+        const allowedProps = ANALYTICS_VOCABULARY[ev?.name];
+        if (!allowedProps) continue;
+        let bucket = today;
+        const ts = Number(ev.ts);
+        if (Number.isFinite(ts)) {
+            const d = db.day(new Date(ts));
+            if (d >= oldest && d <= today) bucket = d;
+        }
+        const parts = [];
+        for (const key of allowedProps) {
+            const v = ev.props?.[key];
+            if (typeof v !== 'string' || !v) continue;
+            parts.push(`${key}=${v.slice(0, 64).replace(/[^\w.:+/@-]/g, '_')}`);
+        }
+        const name = ev.name + (parts.length ? '|' + parts.join('|') : '');
+        const k = `${bucket} ${name}`;
+        counts.set(k, (counts.get(k) || 0) + 1);
+        accepted++;
+    }
+    const rows = [...counts].map(([k, count]) => {
+        const [day, name] = k.split(' ');
+        return { day, name, count };
+    });
+    if (rows.length) db.recordAnalytics(db.hashInstallId(installId), rows);
+    db.bumpMetric('analytics.ok');
+    res.json({ accepted, dropped: raw.length - accepted });
+});
+
 app.get('/v1/usage', auth, (req, res) => {
     const { install_id: installId, tier } = req.install;
     res.json({
@@ -291,6 +405,11 @@ app.get('/v1/admin/overview', adminAuth, (req, res) => {
         day: db.day(),
         metrics: db.metricsSince(db.daysAgo(days - 1)),
         actives: db.actives(),
+        analytics: {
+            daily: db.analyticsDaily(db.daysAgo(days - 1)),
+            top: db.analyticsTop(db.daysAgo(days - 1), 40),
+            actives: db.analyticsActives()
+        },
         providers: router.statusSnapshot(),
         tierQuotas: config.tierQuotas,
         installs: db.installList(200),
