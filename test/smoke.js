@@ -71,7 +71,7 @@ async function main() {
     assert.strictEqual(r.body.code, 'quota');
 
     // news is unmetered: works even at search quota, and leaves usage alone
-    r = await post('/v1/news', { topics: ['cricket', 'ai'] }, bearer(key1));
+    r = await post('/v1/news', { topics: ['baseball', 'ai'] }, bearer(key1));
     assert.strictEqual(r.status, 200, JSON.stringify(r.body));
     assert.strictEqual(r.body.topics.length, 2);
     const item = r.body.topics[0].items[0];
