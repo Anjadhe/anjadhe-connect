@@ -70,6 +70,12 @@ day-granularity `last_seen_day` per install — no per-request records, no
 query text, no IPs. Install ids appear only in their stored (hashed) form;
 each Mac's Settings card shows the same hash for matching.
 
+Two things to know when reading the charts. Days are **UTC** calendar days,
+so a bar labelled `07-29` starts at 5pm PDT on the 28th. And the counters
+are service-wide with no notion of who: a developer smoke test against
+production lands in them looking exactly like a user's device (the relay
+smoke in the app repo now needs `ALLOW_PROD_RELAY=1` for that reason).
+
 Alerts (provider budget nearly spent, all upstreams down, high upstream
 failure rate, mint spikes, installs hitting quota) always appear on the
 dashboard. Set `ALERT_WEBHOOK_URL` (Slack/Discord webhook or an ntfy.sh

@@ -503,7 +503,7 @@ function renderRelay(byDay) {
     { name: 'relay.rejects', label: 'rejected', color: 'var(--status-warn)' }
   ];
   columnChart($('#card-relay .plot'), days, series, rByDay);
-  dataTable($('#card-relay .table-wrap'), ['Day', 'Macs', 'Phones', 'Frames', 'Rejected'],
+  dataTable($('#card-relay .table-wrap'), ['Day', 'Mac connects', 'Phone connects', 'Frames', 'Rejected'],
     days.map(d => [d, rByDay[d]['relay.connect.host'], rByDay[d]['relay.connect.client'],
       fmt(val(byDay, d, 'relay.frames')), rByDay[d]['relay.rejects']]).reverse());
 }
