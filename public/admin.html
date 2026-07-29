@@ -203,6 +203,15 @@
       </div>
       <div class="plot"></div><div class="table-wrap hidden"></div>
     </div>
+    <div class="card chart-card" id="card-relay">
+      <div class="head"><h2>Relay connects per day</h2><button data-toggle="relay">table</button></div>
+      <div class="legend">
+        <span><i style="background:var(--series-1)"></i>Macs</span>
+        <span><i style="background:var(--series-2)"></i>phones</span>
+        <span><i style="background:var(--status-warn)"></i>&#9888; rejected</span>
+      </div>
+      <div class="plot"></div><div class="table-wrap hidden"></div>
+    </div>
   </div>
 
   <div class="card" id="installs-card">
@@ -289,6 +298,7 @@ function render() {
   renderLatency(byDay);
   renderProviders();
   renderAnalytics();
+  renderRelay(byDay);
   renderInstalls();
 }
 
@@ -320,7 +330,9 @@ function renderTiles(byDay) {
     { label: 'Total installs', value: fmt(overview.keys), note: overview.tiers.map(t => `${t.n} ${t.tier}`).join(' · ') },
     { label: 'Blocked today', value: fmt(val(byDay, today, 'search.quota') + val(byDay, today, 'search.rate')), note: 'quota + rate limits' },
     { label: 'Upstream fail rate today', value: failRate, note: `${fmt(provFail)} of ${fmt(provOk + provFail)} calls` },
-    { label: 'Analytics installs (7d)', value: fmt(overview.analytics?.actives?.last7d ?? 0), note: 'opt-in app analytics' }
+    { label: 'Analytics installs (7d)', value: fmt(overview.analytics?.actives?.last7d ?? 0), note: 'opt-in app analytics' },
+    { label: 'Relay connections now', value: fmt((overview.relay?.hosts ?? 0) + (overview.relay?.clients ?? 0)),
+      note: `${fmt(overview.relay?.hosts ?? 0)} Macs · ${fmt(overview.relay?.clients ?? 0)} phones · ${fmt(overview.relay?.rooms ?? 0)} rooms` }
   ];
   $('#tiles').innerHTML = tiles.map(t =>
     `<div class="tile"><div class="label">${t.label}</div><div class="value">${t.value}</div>${t.note ? `<div class="note">${t.note}</div>` : ''}</div>`
@@ -469,6 +481,31 @@ function renderAnalytics() {
     [{ name: 'analytics.total', label: 'events', color: 'var(--series-1)' }], byDay);
   dataTable($('#card-analytics .table-wrap'), ['Event', 'Count'],
     a.top.map(t => [t.name, fmt(t.n)]));
+}
+
+// Relay: connect counts as columns (frame volume dwarfs connects, so frames
+// live in the table view, not the chart). Rejects sum every reject reason;
+// the table breaks them out via the tooltip-free per-day rows.
+function renderRelay(byDay) {
+  const days = dayList();
+  const rejectNames = ['relay.reject.hello', 'relay.reject.rooms', 'relay.reject.clients', 'relay.reject.ip', 'relay.reject.throttle'];
+  const rByDay = {};
+  for (const d of days) {
+    rByDay[d] = {
+      'relay.connect.host': val(byDay, d, 'relay.connect.host'),
+      'relay.connect.client': val(byDay, d, 'relay.connect.client'),
+      'relay.rejects': rejectNames.reduce((s, n) => s + val(byDay, d, n), 0)
+    };
+  }
+  const series = [
+    { name: 'relay.connect.host', label: 'Mac connects', color: 'var(--series-1)' },
+    { name: 'relay.connect.client', label: 'phone connects', color: 'var(--series-2)' },
+    { name: 'relay.rejects', label: 'rejected', color: 'var(--status-warn)' }
+  ];
+  columnChart($('#card-relay .plot'), days, series, rByDay);
+  dataTable($('#card-relay .table-wrap'), ['Day', 'Macs', 'Phones', 'Frames', 'Rejected'],
+    days.map(d => [d, rByDay[d]['relay.connect.host'], rByDay[d]['relay.connect.client'],
+      fmt(val(byDay, d, 'relay.frames')), rByDay[d]['relay.rejects']]).reverse());
 }
 
 function renderInstalls() {

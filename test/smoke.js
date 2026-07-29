@@ -296,6 +296,16 @@ async function main() {
     // non-relay upgrade path is refused
     await assert.rejects(wsOpen('/v1/search'));
 
+    // relay observability: live gauges + daily counters in the overview
+    r = await get('/v1/admin/overview?days=7', { 'x-admin-token': 'test-admin' });
+    for (const k of ['rooms', 'hosts', 'clients']) assert.strictEqual(typeof r.body.relay[k], 'number');
+    const rm = {};
+    for (const row of r.body.metrics) rm[row.name] = (rm[row.name] || 0) + row.n;
+    assert.strictEqual(rm['relay.connect.host'], 1);
+    assert.strictEqual(rm['relay.connect.client'], 1);
+    assert.strictEqual(rm['relay.frames'], 3); // deadbeef + cafef00d + the big one
+    assert.strictEqual(rm['relay.reject.hello'], 1);
+
     // the dashboard shell is served (data-free — auth happens per fetch)
     const page = await fetch(base + '/admin');
     assert.strictEqual(page.status, 200);
