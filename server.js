@@ -158,8 +158,13 @@ function adminAuth(req, res, next) {
 
 // ── Routes ──────────────────────────────────────────────────────────────
 
+// `env` carries ENV_LABEL when the operator set one, so /admin can name the
+// deployment it is showing before any token is entered — the point being that
+// production and staging dashboards are otherwise identical.
 app.get('/healthz', (req, res) => {
-    res.json({ ok: true, providers: router.available() });
+    const body = { ok: true, providers: router.available() };
+    if (config.envLabel) body.env = config.envLabel;
+    res.json(body);
 });
 
 // Mint (or rotate) the key for an installation. Since 2026-07-28 the app

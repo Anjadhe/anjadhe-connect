@@ -66,6 +66,19 @@
 
   .hidden { display: none !important; }
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+
+  /* environment banner (ENV_LABEL) — the only thing that distinguishes two
+     otherwise identical dashboards, so it sits above everything, including
+     the token gate. Anything that isn't production gets the warn colour:
+     the mistake worth preventing is treating staging as real. */
+  #env-banner {
+    position: sticky; top: -24px; z-index: 10; margin: -24px -24px 18px;
+    padding: 7px 24px; font-size: 12.5px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    background: var(--status-warn); color: #1a1400;
+  }
+  #env-banner.is-prod { background: var(--ink); color: var(--page); }
+  #env-banner .what { font-weight: 500; letter-spacing: 0.03em; text-transform: none; opacity: 0.85; }
   .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
 
   /* token gate */
@@ -141,6 +154,8 @@
 </head>
 <body>
 
+<div id="env-banner" class="hidden"></div>
+
 <div id="gate" class="card">
   <h1>Anjadhe Connect</h1>
   <p style="color:var(--ink-2); margin-top:6px">Enter the admin token to view the dashboard.</p>
@@ -206,8 +221,8 @@
     <div class="card chart-card" id="card-relay">
       <div class="head"><h2>Relay connects per day</h2><button data-toggle="relay">table</button></div>
       <div class="legend">
-        <span><i style="background:var(--series-1)"></i>Macs</span>
-        <span><i style="background:var(--series-2)"></i>phones</span>
+        <span><i style="background:var(--series-1)"></i>Mac connects</span>
+        <span><i style="background:var(--series-2)"></i>phone connects</span>
         <span><i style="background:var(--status-warn)"></i>&#9888; rejected</span>
       </div>
       <div class="plot"></div><div class="table-wrap hidden"></div>
@@ -589,6 +604,24 @@ const go = () => {
 $('#token-go').addEventListener('click', go);
 $('#token-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
 
+// Which deployment is this? /healthz is public, so the banner is up before
+// the token gate — you should never be typing production's token into
+// staging's box, or reading staging's numbers as if they were real.
+async function showEnvironment() {
+  let env = null;
+  try { env = (await (await fetch('/healthz')).json()).env || null; } catch { /* offline — no banner */ }
+  if (!env) return;
+  const isProd = /^prod/i.test(env);
+  const banner = $('#env-banner');
+  banner.innerHTML = esc(env)
+    + (isProd ? ' <span class="what">real users, real numbers</span>'
+              : ' <span class="what">test deployment, numbers here are not real usage</span>');
+  banner.classList.toggle('is-prod', isProd);
+  banner.classList.remove('hidden');
+  document.title = `Anjadhe Connect — Admin (${env})`;
+}
+
+showEnvironment();
 if (sessionStorage.getItem(TOKEN_KEY)) load(); else showGate();
 setInterval(() => { if (!$('#dash').classList.contains('hidden')) load(); }, 60000);
 </script>

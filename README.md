@@ -139,6 +139,10 @@ differences:
   `PROVIDER_BUDGETS` cap.
 - **A different `ADMIN_TOKEN`.** Staging's dashboard should not open with
   production's token.
+- **`ENV_LABEL=staging`** (and `ENV_LABEL=production` on the real one) — puts
+  a banner across the top of `/admin` and the label in the browser tab, so
+  two identical-looking dashboards can't be mistaken for each other. The
+  banner renders before the token gate, from the public `/healthz`.
 - **No `ALERT_WEBHOOK_URL`**, unless you are specifically testing alerts —
   otherwise staging pages you about staging.
 - **The Railway-generated `*.up.railway.app` domain** is enough; no DNS
