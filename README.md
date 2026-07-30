@@ -120,6 +120,43 @@ Then point the Anjadhe app at it with `ANJADHE_CONNECT_URL=https://your.host`.
 Note the license below: self-hosting for yourself is fine; running it as a
 commercial service is not.
 
+## Staging
+
+A second service, same repo, own volume — so test traffic never lands in
+production's counters and destructive things (schema changes, tier edits,
+alert webhooks) have somewhere to fail. Because the service is entirely
+env-configured, staging needs no code of its own.
+
+Set it up the same way as above, in the same Railway project, with these
+differences:
+
+- **Never production's volume** (Railway volumes are per-service, so this
+  is the default). Staging can also run with no volume at all — its DB then
+  resets on every deploy, which for staging is usually a feature.
+- **No provider keys**, plus `SEARCH_MOCK=1` — searches return canned
+  results, so staging never spends upstream quota. Add a key only for the
+  rare test that must exercise a real upstream, and give it a tiny
+  `PROVIDER_BUDGETS` cap.
+- **A different `ADMIN_TOKEN`.** Staging's dashboard should not open with
+  production's token.
+- **No `ALERT_WEBHOOK_URL`**, unless you are specifically testing alerts —
+  otherwise staging pages you about staging.
+- **The Railway-generated `*.up.railway.app` domain** is enough; no DNS
+  change, and nothing about the app hardcodes it.
+
+Point things at it per-run, nothing is committed:
+
+```bash
+ANJADHE_CONNECT_URL=https://<staging-host> npm start            # app, in the app repo
+ANJADHE_RELAY_URL=wss://<staging-host>/v1/relay npm start        # app, relay only
+RELAY_URL=wss://<staging-host>/v1/relay node relay/worker/smoke.mjs
+```
+
+What this does **not** buy: a release gate. Both services deploy from
+`main`, so staging gets a change at the same time production does. If you
+later want a gate, move production to deploying from a `release` branch and
+leave staging on `main`.
+
 ## Roadmap
 
 - `/v1/relay` — mobile-sync relay.
