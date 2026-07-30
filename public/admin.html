@@ -168,6 +168,10 @@
   <header>
     <h1>Anjadhe Connect — Admin</h1>
     <div class="sub"><span id="hdr-day"></span> · <span id="hdr-period"></span> UTC</div>
+    <!-- Every bucket on this page is a UTC calendar day, so for an operator
+         west of Greenwich "today" flips mid-afternoon and the newest bar can
+         read as tomorrow's date. Say so, in their own clock. -->
+    <div class="sub" id="hdr-tz"></div>
   </header>
 
   <div id="filters" class="row">
@@ -306,6 +310,7 @@ function render() {
   const byDay = pivot();
   $('#hdr-day').textContent = overview.day;
   $('#hdr-period').textContent = overview.period;
+  renderTzNote();
   renderAlerts();
   renderTiles(byDay);
   renderSearches(byDay);
@@ -315,6 +320,23 @@ function render() {
   renderAnalytics();
   renderRelay(byDay);
   renderInstalls();
+}
+
+// Counters bucket on UTC days (db.day) and always will — the service has no
+// idea where its installs are. So the dashboard explains the offset in the
+// viewer's own clock rather than pretending the buckets are local.
+function renderTzNote() {
+  const now = new Date();
+  const zone = new Intl.DateTimeFormat('en-US', { timeZoneName: 'short' })
+    .formatToParts(now).find((p) => p.type === 'timeZoneName')?.value || 'local time';
+  const localNow = now.toLocaleString('en-US',
+    { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  // Next UTC midnight, on the viewer's clock — when "today" here advances.
+  const rollover = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1))
+    .toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  $('#hdr-tz').textContent =
+    `Every day bucket below is a UTC calendar day. You are at ${localNow} ${zone}, ` +
+    `so the newest day here advances at ${rollover} ${zone}.`;
 }
 
 function renderAlerts() {
@@ -339,12 +361,12 @@ function renderTiles(byDay) {
   const provFail = overview.providers.reduce((s, p) => s + val(byDay, today, `provider.${p.name}.fail`), 0);
   const failRate = provOk + provFail ? Math.round(100 * provFail / (provOk + provFail)) + '%' : '—';
   const tiles = [
-    { label: 'Searches today', value: fmt(okToday) },
-    { label: 'Searches this month', value: fmt(overview.searchesThisPeriod) },
+    { label: 'Searches today', value: fmt(okToday), note: `UTC day ${today}` },
+    { label: 'Searches this month', value: fmt(overview.searchesThisPeriod), note: `UTC month ${overview.period}` },
     { label: 'Active installs today', value: fmt(overview.actives.today), note: `${fmt(overview.actives.last7d)} in 7d · ${fmt(overview.actives.last30d)} in 30d` },
     { label: 'Total installs', value: fmt(overview.keys), note: overview.tiers.map(t => `${t.n} ${t.tier}`).join(' · ') },
-    { label: 'Blocked today', value: fmt(val(byDay, today, 'search.quota') + val(byDay, today, 'search.rate')), note: 'quota + rate limits' },
-    { label: 'Upstream fail rate today', value: failRate, note: `${fmt(provFail)} of ${fmt(provOk + provFail)} calls` },
+    { label: 'Blocked today', value: fmt(val(byDay, today, 'search.quota') + val(byDay, today, 'search.rate')), note: 'quota + rate limits, UTC day' },
+    { label: 'Upstream fail rate today', value: failRate, note: `${fmt(provFail)} of ${fmt(provOk + provFail)} calls, UTC day` },
     { label: 'Analytics installs (7d)', value: fmt(overview.analytics?.actives?.last7d ?? 0), note: 'opt-in app analytics' },
     { label: 'Relay connections now', value: fmt((overview.relay?.hosts ?? 0) + (overview.relay?.clients ?? 0)),
       note: `${fmt(overview.relay?.hosts ?? 0)} Macs · ${fmt(overview.relay?.clients ?? 0)} phones · ${fmt(overview.relay?.rooms ?? 0)} rooms` }
@@ -537,7 +559,7 @@ function renderInstalls() {
     <td>${esc(k.last_seen_day || '—')}</td>
   </tr>`).join('');
   $('#installs-table').innerHTML =
-    `<tr><th>Install</th><th>Tier</th><th>Used / quota</th><th>Created</th><th>Last seen</th></tr>` + rows;
+    `<tr><th>Install</th><th>Tier</th><th>Used / quota</th><th>Created (UTC)</th><th>Last seen (UTC)</th></tr>` + rows;
   $('#installs-table').querySelectorAll('[data-copy]').forEach((td) => {
     td.style.cursor = 'pointer';
     td.addEventListener('click', () => {
