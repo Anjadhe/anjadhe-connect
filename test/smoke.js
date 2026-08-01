@@ -14,6 +14,7 @@ process.env.SEARCH_MOCK = '1';
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'connect-test-'));
 process.env.ADMIN_TOKEN = 'test-admin';
 process.env.TIER_QUOTAS = '{"free":3,"plus":5}';
+process.env.PROVIDER_PACE_MS = '{"mock":150}';
 
 const app = require('../server');
 const relay = require('../lib/relay');
@@ -310,6 +311,24 @@ async function main() {
     const page = await fetch(base + '/admin');
     assert.strictEqual(page.status, 200);
     assert.ok((await page.text()).includes('Anjadhe Connect'));
+
+    // ── router pacing: PROVIDER_PACE_MS spaces upstream call starts ─────
+    // (config was loaded with {"mock":150} — see env at the top.) Three
+    // concurrent searches must serialize: starts ≥150ms apart, so the
+    // batch takes ≥300ms end to end. Direct router calls — key quotas
+    // live at the route layer and must not be spent here.
+    {
+        const router = require('../lib/router');
+        const t0 = Date.now();
+        const batch = await Promise.all([
+            router.search('pace probe 1', 1),
+            router.search('pace probe 2', 1),
+            router.search('pace probe 3', 1)
+        ]);
+        const elapsed = Date.now() - t0;
+        assert.ok(batch.every(b => b.upstream === 'mock'));
+        assert.ok(elapsed >= 300, `paced batch finished in ${elapsed}ms — pacing not applied`);
+    }
 
     srv.close();
     console.log('smoke: all assertions passed');

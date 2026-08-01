@@ -91,6 +91,15 @@ under its `PROVIDER_BUDGETS` monthly cap, and isn't cooling down after 3
 consecutive failures. Budgets are the cost backstop; cooldown + failover
 keep one flaky upstream from taking the service down.
 
+Upstreams with hard req/s limits are paced server-side: `PROVIDER_PACE_MS`
+(default `{"brave":1100}` — Brave's free tier is 1 req/s) serializes calls
+to that provider with starts spaced that many ms apart. Client machines
+throttle themselves individually, but they all share these upstream keys,
+so only the server can enforce the aggregate rate. A paced provider whose
+queue exceeds ~10s of projected wait fails over to the next provider
+immediately (metric `provider.<name>.busy`) without counting toward its
+failure cooldown — congestion is not illness.
+
 ## Run locally
 
 ```bash
