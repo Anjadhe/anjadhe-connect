@@ -408,11 +408,41 @@ app.get('/v1/admin/stats', adminAuth, (req, res) => {
     res.json(db.stats());
 });
 
+// Shared by every windowed admin read, so a `days` value means the same
+// thing on all of them.
+function rangeDays(req) {
+    return Math.max(1, Math.min(90, parseInt(req.query.days, 10) || 30));
+}
+
+// App analytics sliced by install: the busiest installs in the window, each
+// with its per-day event totals. Its own endpoint rather than a field on
+// /v1/admin/overview because the grid is O(installs × days) and would bloat
+// the dashboard's 60-second poll for everyone reading the other panels.
+// Still counters only — a hashed analytics id, a UTC day, a number.
+app.get('/v1/admin/analytics', adminAuth, (req, res) => {
+    const days = rangeDays(req);
+    const limit = Math.max(1, Math.min(500, parseInt(req.query.limit, 10) || 100));
+    const installs = db.analyticsByInstall(db.daysAgo(days - 1), limit);
+    res.json({ day: db.day(), days, limit, installs });
+});
+
+// One install's counters, broken out by day and event name — the drill-down
+// under the grid. Takes the stored (hashed) id: the raw analytics UUID is
+// never at rest here, so there is nothing else to look up by.
+app.get('/v1/admin/analytics/install', adminAuth, (req, res) => {
+    const id = String(req.query.id || '').trim();
+    if (!/^[0-9a-f]{64}$/.test(id)) {
+        return res.status(400).json({ error: 'id must be a stored (SHA-256) install id' });
+    }
+    const days = rangeDays(req);
+    res.json({ installId: id, day: db.day(), days, ...db.analyticsInstall(id, db.daysAgo(days - 1)) });
+});
+
 // Everything the /admin dashboard renders, in one call. Metrics are
 // service-wide daily counters; the install list is the operator view needed
 // for manual tier changes (install ids + counts, never IPs or content).
 app.get('/v1/admin/overview', adminAuth, (req, res) => {
-    const days = Math.max(1, Math.min(90, parseInt(req.query.days, 10) || 30));
+    const days = rangeDays(req);
     res.json({
         ...db.stats(),
         day: db.day(),

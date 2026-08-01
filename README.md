@@ -54,6 +54,8 @@ Auth: `Authorization: Bearer anck_…` (except `/v1/keys`, `/v1/analytics/events
 | `POST /v1/admin/tier` `{installId, tier}` | Manual tier change (header `x-admin-token`). Stripe replaces this in phase 2. |
 | `GET /v1/admin/stats` | Key counts, per-tier counts, this month's usage. |
 | `GET /v1/admin/overview?days=N` | Everything the `/admin` dashboard shows: daily counters, active installs, provider status, alerts, install list. |
+| `GET /v1/admin/analytics?days=N&limit=M` | App-analytics installs (busiest first), each with its per-UTC-day event totals — the dashboard's install × day grid. |
+| `GET /v1/admin/analytics/install?id=<hash>&days=N` | One analytics install's counters, by day and event name. Takes the stored (hashed) id. |
 | `GET /admin` | Operator dashboard (browser page; enter `ADMIN_TOKEN` in the page). |
 | `GET /healthz` | `{ok, providers}` |
 
@@ -69,6 +71,14 @@ comes from **service-wide daily counters** (`metrics_daily`) plus a
 day-granularity `last_seen_day` per install — no per-request records, no
 query text, no IPs. Install ids appear only in their stored (hashed) form;
 each Mac's Settings card shows the same hash for matching.
+
+Opt-in app analytics get their own panel, **App events per install, per day**:
+a grid of installs (busiest first) against UTC days, and a per-install
+drill-down showing which event counters that machine sent on which day. The
+ids there are analytics ids — a separate id space from the Connect installs
+in the table below it, so nothing on the page joins the two. That grid loads
+from its own endpoint rather than the overview, since it is
+O(installs × days) and the page re-polls every 60 seconds.
 
 Two things to know when reading the charts. Days are **UTC** calendar days,
 so a bar labelled `07-29` starts at 5pm PDT on the 28th. And the counters

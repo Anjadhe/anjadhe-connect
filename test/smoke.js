@@ -18,6 +18,7 @@ process.env.PROVIDER_PACE_MS = '{"mock":150}';
 
 const app = require('../server');
 const relay = require('../lib/relay');
+const db = require('../lib/db'); // same process, same SQLite handle — for day() in assertions
 
 async function main() {
     const srv = app.listen(0);
@@ -190,6 +191,46 @@ async function main() {
     assert.strictEqual(top['app.opened|app=x_y_z'], 1);
     assert.ok(!('not.in.vocabulary' in top));
     assert.strictEqual(an.actives.today, 1);
+
+    // a second machine, so the per-install grid has something to separate
+    r = await post('/v1/analytics/events', {
+        installId: 'analytics-uuid-0002',
+        events: [{ name: 'journal.entry_written', ts: now }]
+    });
+    assert.strictEqual(r.body.accepted, 1);
+
+    // per-install slice: busiest first, per-day cells, own id space
+    r = await get('/v1/admin/analytics?days=7', { 'x-admin-token': 'test-admin' });
+    assert.strictEqual(r.status, 200);
+    const grid = r.body.installs;
+    assert.strictEqual(grid.length, 2);
+    assert.strictEqual(grid[0].installId, sha('analytics-uuid-0001'));
+    assert.strictEqual(grid[0].total, 6);
+    assert.strictEqual(grid[0].activeDays, 2);
+    assert.strictEqual(grid[0].byDay[db.day()], 5);              // 5 today, 1 five days back
+    assert.strictEqual(grid[0].byDay[db.daysAgo(5)], 1);
+    assert.strictEqual(grid[1].total, 1);
+    // analytics ids are their own id space — never a Connect install id
+    const conn = await get('/v1/admin/overview?days=7', { 'x-admin-token': 'test-admin' });
+    const connectIds = new Set(conn.body.installs.map(k => k.install_id));
+    for (const g of grid) {
+        assert.match(g.installId, /^[0-9a-f]{64}$/);
+        assert.ok(!connectIds.has(g.installId));
+    }
+
+    // drill-down: one install's counters by day and event name
+    r = await get('/v1/admin/analytics/install?id=' + sha('analytics-uuid-0001') + '&days=7',
+        { 'x-admin-token': 'test-admin' });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.total, 6);
+    assert.strictEqual(r.body.events.length, 5);                 // 5 distinct counters
+    assert.strictEqual(r.body.events[0].day, db.day());           // newest day first
+    assert.ok(r.body.events.some(e => e.name === 'app.opened|app=notes' && e.n === 1));
+    // a raw (unhashed) id is not a lookup key here — nothing raw is at rest
+    r = await get('/v1/admin/analytics/install?id=analytics-uuid-0001&days=7', { 'x-admin-token': 'test-admin' });
+    assert.strictEqual(r.status, 400);
+    r = await get('/v1/admin/analytics?days=7', { 'x-admin-token': 'wrong' });
+    assert.strictEqual(r.status, 401);
 
     // CORS preflight (the app posts from the Electron renderer)
     const pre = await fetch(base + '/v1/analytics/events', { method: 'OPTIONS' });
