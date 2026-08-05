@@ -69,7 +69,9 @@
 const PAGE = 'analytics';
 let overview = null;
 let analyticsInstalls = null;
-let selectedInstall = null;
+// Deep link from the feedback page: ?install=<hash> opens that install's
+// drill-down on load, even when it has no events in the current range.
+let selectedInstall = new URLSearchParams(location.search).get('install') || null;
 </script>
 <script src="/admin/assets/shared.js"></script>
 <script>
@@ -124,7 +126,7 @@ function renderAnalyticsInstalls() {
     : '';
   if (!installs.length) {
     $('#ai-grid').innerHTML = '';
-    closeInstallDetail();
+    if (selectedInstall) openInstallDetail(selectedInstall); else closeInstallDetail();
     return;
   }
   const max = Math.max(1, ...installs.flatMap(i => Object.values(i.byDay)));
@@ -148,8 +150,9 @@ function renderAnalyticsInstalls() {
       if (id === selectedInstall) closeInstallDetail(); else openInstallDetail(id);
     });
   });
-  if (selectedInstall && !installs.some(i => i.installId === selectedInstall)) closeInstallDetail();
-  else if (selectedInstall) openInstallDetail(selectedInstall);
+  // A selected install stays open even when the grid's range excludes it —
+  // the deep-linked drill-down still answers with its own range query.
+  if (selectedInstall) openInstallDetail(selectedInstall);
 }
 
 function closeInstallDetail() {

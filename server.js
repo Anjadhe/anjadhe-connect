@@ -408,11 +408,21 @@ app.post('/v1/feedback', (req, res) => {
     const email = String(req.body?.email || '').trim().slice(0, 200) || null;
     const appVersion = String(req.body?.appVersion || '').trim().slice(0, 40) || null;
     const platform = String(req.body?.platform || '').trim().slice(0, 40) || null;
+    // App-details line the card shows before sending (model, OS, setup
+    // facts) — plain text, capped, optional.
+    const diagnostics = String(req.body?.diagnostics || '').trim().slice(0, 500) || null;
+    // Present only when the user ticked the card's default-off checkbox.
+    // Stored as its SHA-256 — the same form analytics_daily keys on — so
+    // the admin can match the report to that install's usage; the raw id
+    // never touches disk here either.
+    const rawAnalyticsId = String(req.body?.analyticsId || '').trim();
+    const analyticsHash = /^[A-Za-z0-9_-]{8,64}$/.test(rawAnalyticsId)
+        ? db.hashInstallId(rawAnalyticsId) : null;
     if (!allowFeedbackHour(req.ip)) {
         db.bumpMetric('feedback.rate');
         return res.status(429).json({ error: 'Too many messages from this address this hour — please retry later.', code: 'rate' });
     }
-    const id = db.addFeedback({ kind, message, email, appVersion, platform });
+    const id = db.addFeedback({ kind, message, email, appVersion, platform, diagnostics, analyticsHash });
     db.bumpMetric('feedback.ok');
     res.json({ success: true, id });
 });

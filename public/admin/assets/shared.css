@@ -185,7 +185,9 @@ svg text { fill: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-
 .fb-head .fb-actions { margin-left: auto; display: flex; gap: 6px; }
 .fb-head .fb-actions button { font-size: 12px; padding: 2px 10px; }
 .fb-msg { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13.5px; line-height: 1.55; }
-.fb-email a { color: var(--series-1); }
+.fb-diag { margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--grid);
+  color: var(--muted); font-size: 12px; font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
+.fb-email a, .fb-meta a { color: var(--series-1); }
 #fb-empty { color: var(--muted); font-style: italic; font-size: 13px; padding: 24px 0; text-align: center; }
 
 #tooltip {
