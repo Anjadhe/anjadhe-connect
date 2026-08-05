@@ -164,8 +164,7 @@ svg text { fill: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-
 #ai-detail { border-top: 1px solid var(--grid); margin-top: 14px; padding-top: 12px; }
 #ai-detail .detail-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
 #ai-detail .detail-head .sub { color: var(--muted); font-size: 12.5px; }
-#ai-detail .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
-@media (max-width: 820px) { #ai-detail .cols { grid-template-columns: 1fr; } }
+#ai-detail .cols { display: grid; grid-template-columns: 1fr; gap: 16px; align-items: start; }
 #ai-detail .day-start td { border-top: 1px solid var(--baseline); }
 #ai-detail th:nth-child(2), #ai-detail td.ev { text-align: left; }
 #ai-detail .ev { font-family: ui-monospace, monospace; font-size: 12px; }
