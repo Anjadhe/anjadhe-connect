@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect Admin — Analytics</title>
+<!-- Opt-in app analytics: daily events, top counters, and the install × day
+     grid with its per-install drill-down. Counters only — hashed ids, UTC
+     days, numbers. -->
+<link rel="stylesheet" href="/admin/assets/shared.css">
+</head>
+<body>
+
+<div id="env-banner" class="hidden"></div>
+
+<div id="gate" class="card">
+  <h1>Anjadhe Connect</h1>
+  <p style="color:var(--ink-2); margin-top:6px">Enter the admin token to view the dashboard.</p>
+  <input id="token-input" type="password" placeholder="ADMIN_TOKEN" autocomplete="off">
+  <div class="err" id="gate-err"></div>
+  <button id="token-go">Open dashboard</button>
+</div>
+
+<div id="dash" class="hidden">
+  <header>
+    <h1>Connect Admin</h1>
+    <nav class="admin-nav" id="admin-nav"></nav>
+    <div class="spacer"></div>
+    <div id="refresh-note"></div>
+  </header>
+  <div id="hdr-clock"></div>
+
+  <div id="filters" class="row">
+    <div class="range" id="range-buttons">
+      <button data-days="7">7 days</button>
+      <button data-days="30" class="on">30 days</button>
+      <button data-days="90">90 days</button>
+    </div>
+  </div>
+
+  <div id="tiles"></div>
+
+  <div id="charts" style="grid-template-columns: 1fr">
+    <div class="card chart-card" id="card-analytics">
+      <div class="head"><h2>App events per day (opt-in analytics)</h2><button data-toggle="analytics">table</button></div>
+      <div class="legend">
+        <span><i style="background:var(--series-1)"></i>events</span>
+      </div>
+      <div class="plot"></div><div class="table-wrap hidden"></div>
+    </div>
+  </div>
+
+  <div class="card" id="analytics-installs-card" style="margin-bottom:18px">
+    <div class="head row" style="justify-content:space-between; margin-bottom:6px">
+      <h2 style="margin:0">App events per install, per day</h2>
+      <span class="sub" id="ai-note"></span>
+    </div>
+    <div class="privacy-note">These are a <b>different id space</b> from Connect installs &mdash; a separate random per-machine UUID, stored as a SHA-256 hash, so app usage can never be joined to a machine&rsquo;s search usage. Cells are event counts for one UTC day. Click a row to see which events.</div>
+    <div class="grid-wrap"><table id="ai-grid"></table></div>
+    <div id="ai-empty" class="hidden">No app analytics in this range. The feature is off by default in the app.</div>
+    <div id="ai-detail" class="hidden"></div>
+  </div>
+</div>
+
+<div id="tooltip"></div>
+
+<script>
+'use strict';
+const PAGE = 'analytics';
+let overview = null;
+let analyticsInstalls = null;
+let selectedInstall = null;
+</script>
+<script src="/admin/assets/shared.js"></script>
+<script>
+'use strict';
+
+async function loadPage() {
+  [overview, analyticsInstalls] = await Promise.all([
+    api('/v1/admin/overview?days=' + rangeDays),
+    api('/v1/admin/analytics?days=' + rangeDays)
+  ]);
+  render();
+}
+
+function render() {
+  renderClockNote(overview.day, null);
+  navFeedbackBadge(overview.feedback?.new || 0);
+  renderTiles();
+  renderAnalytics();
+  renderAnalyticsInstalls();
+}
+
+function renderTiles() {
+  const a = overview.analytics?.actives || {};
+  const tiles = [
+    { label: 'Analytics installs today', value: fmt(a.today ?? 0) },
+    { label: 'Last 7 days', value: fmt(a.last7d ?? 0) },
+    { label: 'Last 30 days', value: fmt(a.last30d ?? 0) },
+    { label: 'Installs in range', value: fmt(analyticsInstalls?.installs?.length ?? 0), note: `last ${rangeDays} days` }
+  ];
+  $('#tiles').innerHTML = tiles.map(t =>
+    `<div class="tile"><div class="label">${t.label}</div><div class="value">${t.value}</div>${t.note ? `<div class="note">${t.note}</div>` : ''}</div>`
+  ).join('');
+}
+
+function renderAnalytics() {
+  const a = overview.analytics || { daily: [], top: [] };
+  const byDay = {};
+  for (const { day, n } of a.daily) byDay[day] = { 'analytics.total': n };
+  columnChart($('#card-analytics .plot'), dayList(overview.day),
+    [{ name: 'analytics.total', label: 'events', color: 'var(--series-1)' }], byDay);
+  dataTable($('#card-analytics .table-wrap'), ['Event', 'Count'],
+    a.top.map(t => [t.name, fmt(t.n)]));
+}
+
+function renderAnalyticsInstalls() {
+  const installs = analyticsInstalls?.installs || [];
+  const days = dayList(overview.day).slice().reverse();
+  $('#ai-empty').classList.toggle('hidden', installs.length > 0);
+  $('#ai-note').textContent = installs.length
+    ? `${fmt(installs.length)} install${installs.length === 1 ? '' : 's'} with events in the last ${rangeDays} days`
+    + (installs.length >= (analyticsInstalls.limit || 0) ? ' (capped)' : '')
+    : '';
+  if (!installs.length) {
+    $('#ai-grid').innerHTML = '';
+    closeInstallDetail();
+    return;
+  }
+  const max = Math.max(1, ...installs.flatMap(i => Object.values(i.byDay)));
+  const head = `<thead><tr><th class="idcol">Install (analytics id)</th><th>Total</th><th>Days</th>`
+    + days.map(d => `<th>${d.slice(5)}</th>`).join('') + '</tr></thead>';
+  const body = installs.map(i => {
+    const cells = days.map(d => {
+      const n = i.byDay[d] || 0;
+      if (!n) return `<td class="zero">&middot;</td>`;
+      const pct = 8 + 40 * (n / max);
+      return `<td style="background:color-mix(in srgb, var(--series-1) ${pct.toFixed(0)}%, transparent)">${fmt(n)}</td>`;
+    }).join('');
+    return `<tr data-install="${esc(i.installId)}" class="${i.installId === selectedInstall ? 'sel' : ''}">`
+      + `<td class="idcol install-id">${esc(i.installId.slice(0, 12))}&hellip;</td>`
+      + `<td class="total">${fmt(i.total)}</td><td>${fmt(i.activeDays)}</td>${cells}</tr>`;
+  }).join('');
+  $('#ai-grid').innerHTML = head + '<tbody>' + body + '</tbody>';
+  $('#ai-grid').querySelectorAll('tbody tr').forEach((tr) => {
+    tr.addEventListener('click', () => {
+      const id = tr.dataset.install;
+      if (id === selectedInstall) closeInstallDetail(); else openInstallDetail(id);
+    });
+  });
+  if (selectedInstall && !installs.some(i => i.installId === selectedInstall)) closeInstallDetail();
+  else if (selectedInstall) openInstallDetail(selectedInstall);
+}
+
+function closeInstallDetail() {
+  selectedInstall = null;
+  $('#ai-detail').classList.add('hidden');
+  $('#ai-detail').innerHTML = '';
+  $('#ai-grid').querySelectorAll('tr.sel').forEach(tr => tr.classList.remove('sel'));
+}
+
+async function openInstallDetail(id) {
+  selectedInstall = id;
+  $('#ai-grid').querySelectorAll('tbody tr').forEach(tr =>
+    tr.classList.toggle('sel', tr.dataset.install === id));
+  let detail;
+  try {
+    detail = await api(`/v1/admin/analytics/install?id=${encodeURIComponent(id)}&days=${rangeDays}`);
+  } catch { return; }
+  if (selectedInstall !== id) return; // a later click won the race
+  const box = $('#ai-detail');
+  const byDay = {};
+  for (const [d, n] of Object.entries(detail.byDay)) byDay[d] = { 'events': n };
+  let last = null;
+  const rows = detail.events.map((e) => {
+    const newDay = e.day !== last;
+    last = e.day;
+    return `<tr class="${newDay ? 'day-start' : ''}"><td>${newDay ? e.day : ''}</td>`
+      + `<td class="ev">${esc(e.name)}</td><td>${fmt(e.n)}</td></tr>`;
+  }).join('');
+  box.innerHTML = `
+    <div class="detail-head">
+      <b>Install <span class="install-id">${esc(id.slice(0, 16))}&hellip;</span></b>
+      <span class="sub">${fmt(detail.total)} events over ${fmt(Object.keys(detail.byDay).length)} active days</span>
+      <div style="flex:1"></div>
+      <button id="ai-copy">copy full id</button>
+      <button id="ai-close">close</button>
+    </div>
+    <div class="cols">
+      <div class="plot"></div>
+      <div class="table-wrap" style="max-height:260px">
+        <table class="data-table"><tr><th>Day (UTC)</th><th>Event</th><th>Count</th></tr>${rows}</table>
+      </div>
+    </div>`;
+  box.classList.remove('hidden');
+  columnChart($('.plot', box), dayList(overview.day),
+    [{ name: 'events', label: 'events', color: 'var(--series-1)' }], byDay);
+  $('#ai-close').addEventListener('click', closeInstallDetail);
+  $('#ai-copy').addEventListener('click', (e) => {
+    navigator.clipboard.writeText(id);
+    e.target.textContent = 'copied';
+    setTimeout(() => { e.target.textContent = 'copy full id'; }, 800);
+  });
+}
+
+initAdminShell();
+</script>
+</body>
+</html>

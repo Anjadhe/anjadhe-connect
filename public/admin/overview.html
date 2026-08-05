@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect Admin — Overview</title>
+<!-- Service health at a glance: alerts, today's numbers, search/mint/relay
+     charts, provider budgets. Data-free shell; everything is fetched with
+     the operator's token (see assets/shared.js). -->
+<link rel="stylesheet" href="/admin/assets/shared.css">
+</head>
+<body>
+
+<div id="env-banner" class="hidden"></div>
+
+<div id="gate" class="card">
+  <h1>Anjadhe Connect</h1>
+  <p style="color:var(--ink-2); margin-top:6px">Enter the admin token to view the dashboard.</p>
+  <input id="token-input" type="password" placeholder="ADMIN_TOKEN" autocomplete="off">
+  <div class="err" id="gate-err"></div>
+  <button id="token-go">Open dashboard</button>
+</div>
+
+<div id="dash" class="hidden">
+  <header>
+    <h1>Connect Admin</h1>
+    <nav class="admin-nav" id="admin-nav"></nav>
+    <div class="spacer"></div>
+    <div id="refresh-note"></div>
+  </header>
+  <div id="hdr-clock"></div>
+
+  <div id="filters" class="row">
+    <div class="range" id="range-buttons">
+      <button data-days="7">7 days</button>
+      <button data-days="30" class="on">30 days</button>
+      <button data-days="90">90 days</button>
+    </div>
+  </div>
+
+  <div id="alerts"></div>
+  <div id="no-alerts" class="hidden">No active alerts. <span id="webhook-note"></span></div>
+
+  <div id="tiles"></div>
+
+  <div id="charts">
+    <div class="card chart-card" id="card-searches">
+      <div class="head"><h2>Searches per day</h2><button data-toggle="searches">table</button></div>
+      <div class="legend">
+        <span><i style="background:var(--series-1)"></i>served</span>
+        <span><i style="background:var(--status-warn)"></i>&#9888; blocked (quota/rate)</span>
+        <span><i style="background:var(--status-crit)"></i>&#10007; upstream failed</span>
+      </div>
+      <div class="plot"></div><div class="table-wrap hidden"></div>
+    </div>
+    <div class="card chart-card" id="card-mints">
+      <div class="head"><h2>Key mints per day</h2><button data-toggle="mints">table</button></div>
+      <div class="legend">
+        <span><i style="background:var(--series-1)"></i>new installs</span>
+        <span><i style="background:var(--series-2)"></i>rotations</span>
+      </div>
+      <div class="plot"></div><div class="table-wrap hidden"></div>
+    </div>
+    <div class="card chart-card" id="card-latency">
+      <div class="head"><h2>Search latency (range)</h2><button data-toggle="latency">table</button></div>
+      <div class="plot"></div><div class="table-wrap hidden"></div>
+    </div>
+    <div class="card chart-card" id="card-providers">
+      <div class="head"><h2>Upstream providers (this month)</h2></div>
+      <div id="providers"></div>
+    </div>
+    <div class="card chart-card" id="card-relay">
+      <div class="head"><h2>Relay connects per day</h2><button data-toggle="relay">table</button></div>
+      <div class="legend">
+        <span><i style="background:var(--series-1)"></i>Mac connects</span>
+        <span><i style="background:var(--series-2)"></i>phone connects</span>
+        <span><i style="background:var(--status-warn)"></i>&#9888; rejected</span>
+      </div>
+      <div class="plot"></div><div class="table-wrap hidden"></div>
+    </div>
+  </div>
+</div>
+
+<div id="tooltip"></div>
+
+<script>
+'use strict';
+const PAGE = 'overview';
+let overview = null;
+</script>
+<script src="/admin/assets/shared.js"></script>
+<script>
+'use strict';
+
+async function loadPage() {
+  overview = await api('/v1/admin/overview?days=' + rangeDays);
+  render();
+}
+
+function pivot() {
+  const byDay = {};
+  for (const { day, name, n } of overview.metrics) (byDay[day] ??= {})[name] = n;
+  return byDay;
+}
+const sumRange = (byDay, names) => dayList(overview.day).reduce((s, d) => s + names.reduce((t, n) => t + val(byDay, d, n), 0), 0);
+
+function render() {
+  const byDay = pivot();
+  renderClockNote(overview.day, overview.period);
+  navFeedbackBadge(overview.feedback?.new || 0);
+  renderAlerts();
+  renderTiles(byDay);
+  renderSearches(byDay);
+  renderMints(byDay);
+  renderLatency(byDay);
+  renderProviders();
+  renderRelay(byDay);
+}
+
+function renderAlerts() {
+  const box = $('#alerts');
+  box.innerHTML = '';
+  $('#no-alerts').classList.toggle('hidden', overview.alerts.length > 0);
+  $('#webhook-note').textContent = overview.webhookConfigured
+    ? 'Webhook notifications are on.' : 'Tip: set ALERT_WEBHOOK_URL to get notified without opening this page.';
+  const icon = { critical: '&#10007;', warning: '&#9888;', info: '&#8505;' };
+  for (const a of overview.alerts) {
+    const el = document.createElement('div');
+    el.className = 'alert ' + a.severity;
+    el.innerHTML = `<span class="sev">${icon[a.severity] || ''} ${esc(a.severity)}</span><b>${esc(a.title)}</b><span>${esc(a.detail)}</span>`;
+    box.appendChild(el);
+  }
+}
+
+function renderTiles(byDay) {
+  const today = overview.day;
+  const okToday = val(byDay, today, 'search.ok');
+  const provOk = overview.providers.reduce((s, p) => s + val(byDay, today, `provider.${p.name}.ok`), 0);
+  const provFail = overview.providers.reduce((s, p) => s + val(byDay, today, `provider.${p.name}.fail`), 0);
+  const failRate = provOk + provFail ? Math.round(100 * provFail / (provOk + provFail)) + '%' : '—';
+  const fb = overview.feedback || { new: 0, total: 0 };
+  const tiles = [
+    { label: 'Searches today', value: fmt(okToday), note: `UTC day ${today}` },
+    { label: 'Searches this month', value: fmt(overview.searchesThisPeriod), note: `UTC month ${overview.period}` },
+    { label: 'Active installs today', value: fmt(overview.actives.today), note: `${fmt(overview.actives.last7d)} in 7d · ${fmt(overview.actives.last30d)} in 30d` },
+    { label: 'Total installs', value: fmt(overview.keys), note: overview.tiers.map(t => `${t.n} ${t.tier}`).join(' · ') },
+    { label: 'Blocked today', value: fmt(val(byDay, today, 'search.quota') + val(byDay, today, 'search.rate')), note: 'quota + rate limits, UTC day' },
+    { label: 'Upstream fail rate today', value: failRate, note: `${fmt(provFail)} of ${fmt(provOk + provFail)} calls, UTC day` },
+    { label: 'Analytics installs (7d)', value: fmt(overview.analytics?.actives?.last7d ?? 0), note: 'opt-in — details on Analytics' },
+    { label: 'New feedback', value: fmt(fb.new), note: `${fmt(fb.total)} total — read on Feedback`, href: '/admin/feedback' },
+    { label: 'Relay connections now', value: fmt((overview.relay?.hosts ?? 0) + (overview.relay?.clients ?? 0)),
+      note: `${fmt(overview.relay?.hosts ?? 0)} Macs · ${fmt(overview.relay?.clients ?? 0)} phones · ${fmt(overview.relay?.rooms ?? 0)} rooms` }
+  ];
+  $('#tiles').innerHTML = tiles.map(t =>
+    `<div class="tile${t.href ? ' is-link' : ''}"${t.href ? ` onclick="location.href='${t.href}'"` : ''}><div class="label">${t.label}</div><div class="value">${t.value}</div>${t.note ? `<div class="note">${t.note}</div>` : ''}</div>`
+  ).join('');
+}
+
+function renderSearches(byDay) {
+  const days = dayList(overview.day);
+  const series = [
+    { name: 'search.ok', label: 'served', color: 'var(--series-1)' },
+    { name: 'search.quota', label: 'quota-blocked', color: 'var(--status-warn)' },
+    { name: 'search.rate', label: 'rate-blocked', color: 'var(--status-warn)' },
+    { name: 'search.upstream_fail', label: 'upstream failed', color: 'var(--status-crit)' }
+  ];
+  columnChart($('#card-searches .plot'), days, series, byDay);
+  dataTable($('#card-searches .table-wrap'), ['Day', 'Served', 'Quota', 'Rate', 'Failed'],
+    days.map(d => [d, ...series.map(s => val(byDay, d, s.name))]).reverse());
+}
+
+function renderMints(byDay) {
+  const days = dayList(overview.day);
+  const series = [
+    { name: 'mint.new', label: 'new installs', color: 'var(--series-1)' },
+    { name: 'mint.rotate', label: 'rotations', color: 'var(--series-2)' }
+  ];
+  columnChart($('#card-mints .plot'), days, series, byDay);
+  dataTable($('#card-mints .table-wrap'), ['Day', 'New', 'Rotated', 'IP-capped'],
+    days.map(d => [d, val(byDay, d, 'mint.new'), val(byDay, d, 'mint.rotate'), val(byDay, d, 'mint.rate')]).reverse());
+}
+
+function renderLatency(byDay) {
+  const buckets = [
+    { name: 'search.ms.lt500', label: 'under 0.5s' },
+    { name: 'search.ms.lt1500', label: '0.5–1.5s' },
+    { name: 'search.ms.lt4000', label: '1.5–4s' },
+    { name: 'search.ms.gte4000', label: 'over 4s' }
+  ].map(b => ({ ...b, v: sumRange(byDay, [b.name]) }));
+  const max = Math.max(1, ...buckets.map(b => b.v));
+  const W = 480, rowH = 34, padL = 84, H = buckets.length * rowH + 6;
+  let out = '';
+  buckets.forEach((b, i) => {
+    const yMid = i * rowH + rowH / 2;
+    const w = Math.max(b.v > 0 ? 3 : 0, (W - padL - 60) * b.v / max);
+    out += `<text x="${padL - 8}" y="${yMid + 3.5}" text-anchor="end">${b.label}</text>`
+         + `<line x1="${padL}" x2="${padL}" y1="${yMid - 12}" y2="${yMid + 12}" stroke="var(--baseline)"/>`
+         + (w ? `<path d="M${padL},${yMid - 8} L${padL + w - 4},${yMid - 8} Q${padL + w},${yMid - 8} ${padL + w},${yMid - 4} L${padL + w},${yMid + 4} Q${padL + w},${yMid + 8} ${padL + w - 4},${yMid + 8} L${padL},${yMid + 8} Z" fill="var(--series-1)"/>` : '')
+         + `<text x="${padL + w + 8}" y="${yMid + 3.5}">${fmt(b.v)}</text>`;
+  });
+  $('#card-latency .plot').innerHTML = `<svg viewBox="0 0 ${W} ${H}" style="width:100%; height:auto; display:block">${out}</svg>`;
+  dataTable($('#card-latency .table-wrap'), ['Bucket', 'Searches'], buckets.map(b => [b.label, b.v]));
+}
+
+function renderProviders() {
+  const box = $('#providers');
+  if (!overview.providers.length) {
+    box.innerHTML = '<div style="color:var(--muted); font-style:italic">No providers configured.</div>';
+    return;
+  }
+  box.innerHTML = overview.providers.map(p => {
+    const pct = p.budget ? Math.min(100, 100 * p.used / p.budget) : null;
+    const fill = pct === null ? 'var(--series-1)' : pct >= 100 ? 'var(--status-crit)' : pct >= 80 ? 'var(--status-warn)' : 'var(--series-1)';
+    const badges = (p.cooling ? `<span class="badge bad">&#10007; cooling down</span>` : '')
+      + (p.overBudget ? `<span class="badge bad">&#10007; over budget</span>` : '');
+    return `<div class="meter-row">
+      <div class="top"><span>${esc(p.name)}${badges}</span>
+        <span class="stat">${fmt(p.used)}${p.budget ? ` / ${fmt(p.budget)}` : ' (no budget cap)'}</span></div>
+      <div class="meter" style="background: color-mix(in srgb, ${fill} 18%, var(--surface))">
+        <div class="fill" style="width:${pct === null ? (p.used ? 4 : 0) : pct}%; background:${fill}"></div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderRelay(byDay) {
+  const days = dayList(overview.day);
+  const rejectNames = ['relay.reject.hello', 'relay.reject.rooms', 'relay.reject.clients', 'relay.reject.ip', 'relay.reject.throttle'];
+  const rByDay = {};
+  for (const d of days) {
+    rByDay[d] = {
+      'relay.connect.host': val(byDay, d, 'relay.connect.host'),
+      'relay.connect.client': val(byDay, d, 'relay.connect.client'),
+      'relay.rejects': rejectNames.reduce((s, n) => s + val(byDay, d, n), 0)
+    };
+  }
+  const series = [
+    { name: 'relay.connect.host', label: 'Mac connects', color: 'var(--series-1)' },
+    { name: 'relay.connect.client', label: 'phone connects', color: 'var(--series-2)' },
+    { name: 'relay.rejects', label: 'rejected', color: 'var(--status-warn)' }
+  ];
+  columnChart($('#card-relay .plot'), days, series, rByDay);
+  dataTable($('#card-relay .table-wrap'), ['Day', 'Mac connects', 'Phone connects', 'Frames', 'Rejected'],
+    days.map(d => [d, rByDay[d]['relay.connect.host'], rByDay[d]['relay.connect.client'],
+      fmt(val(byDay, d, 'relay.frames')), rByDay[d]['relay.rejects']]).reverse());
+}
+
+initAdminShell();
+</script>
+</body>
+</html>

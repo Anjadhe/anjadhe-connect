@@ -348,10 +348,59 @@ async function main() {
     assert.strictEqual(rm['relay.frames'], 3); // deadbeef + cafef00d + the big one
     assert.strictEqual(rm['relay.reject.hello'], 1);
 
-    // the dashboard shell is served (data-free — auth happens per fetch)
-    const page = await fetch(base + '/admin');
-    assert.strictEqual(page.status, 200);
-    assert.ok((await page.text()).includes('Anjadhe Connect'));
+    // every admin page + the shared assets are served (data-free — auth
+    // happens per fetch inside the pages)
+    for (const p of ['/admin', '/admin/analytics', '/admin/installs', '/admin/feedback']) {
+        const page = await fetch(base + p);
+        assert.strictEqual(page.status, 200, p);
+        assert.ok((await page.text()).includes('Connect Admin'), p);
+    }
+    assert.strictEqual((await fetch(base + '/admin/assets/shared.js')).status, 200);
+    assert.strictEqual((await fetch(base + '/admin/nope')).status, 404);
+
+    // ── feedback: ingest → admin list → status flow ─────────────────────
+    // Rejects: empty and over-long messages.
+    r = await post('/v1/feedback', { message: '' });
+    assert.strictEqual(r.status, 400);
+    r = await post('/v1/feedback', { message: 'x'.repeat(4001) });
+    assert.strictEqual(r.status, 400);
+
+    // Accepts a support request with optional fields; unknown kind files
+    // as 'feedback'.
+    r = await post('/v1/feedback', {
+        message: 'The sync between my Macs stopped working after the update.',
+        kind: 'support', email: 'user@example.com', appVersion: '0.1.0-alpha.25', platform: 'darwin arm64'
+    });
+    assert.strictEqual(r.status, 200);
+    const fbId = r.body.id;
+    r = await post('/v1/feedback', { message: 'Love the new Email AI page!', kind: 'bogus' });
+    assert.strictEqual(r.status, 200);
+
+    // Admin list: both rows, newest first, counts correct, no auth = 401.
+    assert.strictEqual((await fetch(base + '/v1/admin/feedback')).status, 401);
+    r = await get('/v1/admin/feedback?status=all', { 'x-admin-token': 'test-admin' });
+    assert.strictEqual(r.body.counts.new, 2);
+    assert.strictEqual(r.body.items.length, 2);
+    assert.strictEqual(r.body.items[1].kind, 'support');
+    assert.strictEqual(r.body.items[1].email, 'user@example.com');
+    assert.strictEqual(r.body.items[0].kind, 'feedback');
+    assert.strictEqual(r.body.items[0].email, null);
+    // No id of any kind on a row — the not-joinable promise, as a test.
+    assert.ok(!('install_id' in r.body.items[0]));
+
+    // Status flow: close → shows under closed, drops from new; bad id 404s.
+    r = await post('/v1/admin/feedback/status', { id: fbId, status: 'closed' }, { 'x-admin-token': 'test-admin' });
+    assert.strictEqual(r.status, 200);
+    r = await get('/v1/admin/feedback?status=new', { 'x-admin-token': 'test-admin' });
+    assert.strictEqual(r.body.items.length, 1);
+    assert.strictEqual(r.body.counts.closed, 1);
+    r = await post('/v1/admin/feedback/status', { id: 999999, status: 'read' }, { 'x-admin-token': 'test-admin' });
+    assert.strictEqual(r.status, 404);
+
+    // Overview carries the counts (the nav badge + tile read them).
+    r = await get('/v1/admin/overview?days=7', { 'x-admin-token': 'test-admin' });
+    assert.strictEqual(r.body.feedback.new, 1);
+    assert.strictEqual(r.body.feedback.total, 2);
 
     // ── router pacing: PROVIDER_PACE_MS spaces upstream call starts ─────
     // (config was loaded with {"mock":150} — see env at the top.) Three

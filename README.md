@@ -29,6 +29,14 @@ than a UTC day. The analytics install id is a separate random UUID from
 the Connect key's install id, hashed at rest like everything else, so
 app-usage counters can never be joined against a machine's search usage.
 
+Feedback (`/v1/feedback`) is the one endpoint that stores user-written
+text, because that is its purpose: the app's Settings › Send Feedback card
+posts a message the user wrote to the operator, and pressing Send is the
+consent. The same discipline wraps around it — keyless, no install id of
+any kind on the row (not even the analytics UUID), no IPs at rest — so a
+message can never be joined to a machine's search or analytics usage. An
+optional reply-to email is stored only if the user typed one.
+
 The relay (`/v1/relay/<routingId>`, WebSocket) is a zero-knowledge
 rendezvous: a user's Mac dials out and holds a connection; their phone
 connects with the same opaque routing id; the relay forwards frames
@@ -51,12 +59,15 @@ Auth: `Authorization: Bearer anck_…` (except `/v1/keys`, `/v1/analytics/events
 | `GET /v1/usage` | `{tier, used, quota, period, resetsAt}` |
 | `POST /v1/analytics/events` `{installId, events}` | Opt-in app-analytics ingest (keyless — see Privacy). Events outside the vocabulary are dropped; the batch is aggregated into daily counters on arrival. Returns `{accepted, dropped}`. |
 | `wss://…/v1/relay/<routingId>` | Zero-knowledge mobile-sync relay (WebSocket, keyless — see Privacy). Frames are capped at 1 MiB; the app's channel layer chunks larger payloads. Per-IP connect limits and per-connection forwarding budgets apply. |
+| `POST /v1/feedback` `{message, kind?, email?, appVersion?, platform?}` | Feedback / support ingest (keyless — see Privacy). `kind` is `feedback` (default) or `support`; per-IP hourly limit. |
 | `POST /v1/admin/tier` `{installId, tier}` | Manual tier change (header `x-admin-token`). Stripe replaces this in phase 2. |
 | `GET /v1/admin/stats` | Key counts, per-tier counts, this month's usage. |
 | `GET /v1/admin/overview?days=N` | Everything the `/admin` dashboard shows: daily counters, active installs, provider status, alerts, install list. |
 | `GET /v1/admin/analytics?days=N&limit=M` | App-analytics installs (busiest first), each with its per-UTC-day event totals — the dashboard's install × day grid. |
 | `GET /v1/admin/analytics/install?id=<hash>&days=N` | One analytics install's counters, by day and event name. Takes the stored (hashed) id. |
-| `GET /admin` | Operator dashboard (browser page; enter `ADMIN_TOKEN` in the page). |
+| `GET /v1/admin/feedback?status=new\|all\|closed&limit=N` | Feedback list + counts. |
+| `POST /v1/admin/feedback/status` `{id, status}` | Move a feedback item between `new` / `read` / `closed`. |
+| `GET /admin` | Operator pages (browser; enter `ADMIN_TOKEN` in the page). `/admin` is service health; `/admin/analytics`, `/admin/installs` and `/admin/feedback` are its siblings. |
 | `GET /healthz` | `{ok, providers}` |
 
 Tiers (defaults, env-tunable): `free` 300 searches/mo, `plus` 3,000,
@@ -64,13 +75,17 @@ Tiers (defaults, env-tunable): `free` 300 searches/mo, `plus` 3,000,
 
 ## Observability & alerts
 
-`/admin` is a single-page operator dashboard: searches per day (served /
-blocked / failed), key mints, latency buckets, provider budget meters, active
-installs, and an install list for manual tier changes. Everything it shows
-comes from **service-wide daily counters** (`metrics_daily`) plus a
-day-granularity `last_seen_day` per install — no per-request records, no
-query text, no IPs. Install ids appear only in their stored (hashed) form;
-each Mac's Settings card shows the same hash for matching.
+`/admin` is a small multi-page operator console (one shell, four pages):
+**Overview** is service health — alerts, today's tiles, searches / mints /
+relay per day, latency buckets, provider budget meters; **Analytics** holds
+the opt-in app-analytics charts and the install × day grid with its
+drill-down; **Installs** is the Connect-key list for manual tier changes;
+**Feedback** is where user messages are read and closed. Apart from
+feedback's user-written messages, everything shown comes from
+**service-wide daily counters** (`metrics_daily`) plus a day-granularity
+`last_seen_day` per install — no per-request records, no query text, no
+IPs. Install ids appear only in their stored (hashed) form; each Mac's
+Settings card shows the same hash for matching.
 
 Opt-in app analytics get their own panel, **App events per install, per day**:
 a grid of installs (busiest first) against UTC days, and a per-install

@@ -111,6 +111,24 @@ function allowAnalyticsMinute(ip) {
     return true;
 }
 
+// Feedback is rare by nature — a handful per hour per IP absorbs a shared
+// office without opening a spam door. Keyless like analytics, so per-IP is
+// the only handle there is.
+const FEEDBACK_PER_HOUR = 5;
+const _feedbackByIp = new Map(); // ip -> {windowStart, count}
+function allowFeedbackHour(ip) {
+    if (_feedbackByIp.size > 10000) _feedbackByIp.clear();
+    const now = Date.now();
+    const cur = _feedbackByIp.get(ip);
+    if (!cur || now - cur.windowStart >= 3600000) {
+        _feedbackByIp.set(ip, { windowStart: now, count: 1 });
+        return true;
+    }
+    if (cur.count >= FEEDBACK_PER_HOUR) return false;
+    cur.count++;
+    return true;
+}
+
 const _searchByInstall = new Map(); // installId -> {windowStart, count}
 function allowMinute(installId, tier) {
     if (_searchByInstall.size > 10000) _searchByInstall.clear();
@@ -369,6 +387,52 @@ app.post('/v1/analytics/events', (req, res) => {
     res.json({ accepted, dropped: raw.length - accepted });
 });
 
+// ── User feedback / support requests ────────────────────────────────────
+// The app's Settings › Send feedback card posts here. Same privacy stance
+// as analytics, applied to content the user WROTE to the operator: keyless
+// (no anck_ key, so a message can't be joined to search usage), no install
+// id of any kind on the row, no IP at rest. The message itself is stored —
+// that is the entire point, and pressing Send is the consent. An optional
+// email rides along only if the user typed one, for replies.
+app.options('/v1/feedback', (req, res) => {
+    analyticsCors(res);
+    res.sendStatus(204);
+});
+
+app.post('/v1/feedback', (req, res) => {
+    analyticsCors(res);
+    const message = String(req.body?.message || '').trim();
+    if (message.length < 3) return res.status(400).json({ error: 'message required' });
+    if (message.length > 4000) return res.status(400).json({ error: 'message too long (max 4000 chars)' });
+    const kind = req.body?.kind === 'support' ? 'support' : 'feedback';
+    const email = String(req.body?.email || '').trim().slice(0, 200) || null;
+    const appVersion = String(req.body?.appVersion || '').trim().slice(0, 40) || null;
+    const platform = String(req.body?.platform || '').trim().slice(0, 40) || null;
+    if (!allowFeedbackHour(req.ip)) {
+        db.bumpMetric('feedback.rate');
+        return res.status(429).json({ error: 'Too many messages from this address this hour — please retry later.', code: 'rate' });
+    }
+    const id = db.addFeedback({ kind, message, email, appVersion, platform });
+    db.bumpMetric('feedback.ok');
+    res.json({ success: true, id });
+});
+
+app.get('/v1/admin/feedback', adminAuth, (req, res) => {
+    const status = ['new', 'read', 'closed', 'all'].includes(req.query.status) ? req.query.status : 'all';
+    const limit = Math.max(1, Math.min(500, parseInt(req.query.limit, 10) || 200));
+    res.json({ counts: db.feedbackCounts(), items: db.feedbackList(status, limit) });
+});
+
+app.post('/v1/admin/feedback/status', adminAuth, (req, res) => {
+    const id = parseInt(req.body?.id, 10);
+    const status = String(req.body?.status || '');
+    if (!Number.isFinite(id) || !['new', 'read', 'closed'].includes(status)) {
+        return res.status(400).json({ error: 'id and status (new|read|closed) required' });
+    }
+    if (!db.setFeedbackStatus(id, status)) return res.status(404).json({ error: 'Unknown feedback id' });
+    res.json({ success: true, id, status });
+});
+
 // The relay speaks WebSocket only — connections arrive via the HTTP
 // server's `upgrade` event (see relay.attach in the listen block), never
 // through Express. A plain GET here is a client mistake.
@@ -457,17 +521,25 @@ app.get('/v1/admin/overview', adminAuth, (req, res) => {
         relay: relay.stats(),
         tierQuotas: config.tierQuotas,
         installs: db.installList(200),
+        feedback: db.feedbackCounts(),
         alerts: alerts.evaluate(),
         webhookConfigured: !!config.alertWebhookUrl
     });
 });
 
-// The dashboard shell. Serving it without auth is fine — it contains no
-// data (this repo is public anyway); every data fetch it makes goes through
-// adminAuth with the token the operator enters in the page.
-app.get('/admin', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'admin.html'));
+// The admin pages. Multi-page since 2026-08-04 (one dashboard had grown
+// every panel the service owns): /admin is service health, with analytics,
+// installs and feedback as sibling pages sharing one shell (public/admin/).
+// Serving them without auth is fine — the files contain no data (this repo
+// is public anyway); every data fetch goes through adminAuth with the
+// token the operator enters, and shared.js carries it between pages.
+const ADMIN_PAGES = { '': 'overview', overview: 'overview', analytics: 'analytics', installs: 'installs', feedback: 'feedback' };
+app.get(['/admin', '/admin/:page'], (req, res, next) => {
+    const page = ADMIN_PAGES[req.params.page || ''];
+    if (!page) return next();
+    res.sendFile(path.join(__dirname, 'public', 'admin', page + '.html'));
 });
+app.use('/admin/assets', express.static(path.join(__dirname, 'public', 'admin', 'assets')));
 
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 
