@@ -47,6 +47,12 @@ any kind on the row (not even the analytics UUID), no IPs at rest — so a
 message can never be joined to a machine's search or analytics usage. An
 optional reply-to email is stored only if the user typed one.
 
+Feedback is **kept for one year, then deleted** — status makes no
+difference, since a closed report and a forgotten one are the same
+liability. The sweep runs at startup and daily
+(`FEEDBACK_RETENTION_DAYS`); analytics counters age out on their own
+clock (`ANALYTICS_RETENTION_DAYS`, 400 days).
+
 The relay (`/v1/relay/<routingId>`, WebSocket) is a zero-knowledge
 rendezvous: a user's Mac dials out and holds a connection; their phone
 connects with the same opaque routing id; the relay forwards frames

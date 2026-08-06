@@ -227,33 +227,66 @@ function auth(req, res, next) {
     next();
 }
 
-// Admin token guard. Failures are rate-limited per IP — the token is the
-// only credential, so guessing at line speed must not be free — and both
-// sides are hashed to equal length before the timing-safe compare, so
-// nothing (not even the token's length) leaks through the comparison.
+// Admin token guard. The token is the ONLY admin credential, so guessing it
+// must never be cheap. Three layers, and both compares are over SHA-256
+// digests so even the token's length can't leak from the comparison:
+//
+//  1. per-IP: 10 failures per 15 minutes (the /64 bucket, so IPv6 doesn't
+//     hand an attacker a fresh identity per request);
+//  2. service-wide: 100 failures per 15 minutes, which is the layer per-IP
+//     can't be — distributed guessing across a thousand addresses walks
+//     straight past (1) while barely registering on its own counters;
+//  3. an exemption so (2) can't be used to lock the operator out: an IP
+//     that authenticated successfully in the last 7 days keeps its access
+//     while the global brake is engaged. Without it, sustained guessing
+//     from anywhere would deny the console to everyone, turning a
+//     brute-force attempt into a guaranteed outage.
+//
+// None of this substitutes for token entropy — it bounds an online guess
+// rate, it does not make a weak token safe. ADMIN_TOKEN should be 32+
+// random chars; the boot log warns when it is short.
 const ADMIN_FAILS_PER_WINDOW = 10;
+const ADMIN_GLOBAL_FAILS_PER_WINDOW = 100;
 const ADMIN_FAIL_WINDOW_MS = 15 * 60 * 1000;
-const _adminFailsByIp = new Map(); // ip -> {windowStart, count}
+const ADMIN_KNOWN_GOOD_MS = 7 * 24 * 60 * 60 * 1000;
+const _adminFailsByIp = new Map();  // ip bucket -> {windowStart, count}
+const _adminGoodIps = new Map();    // ip bucket -> last successful auth (ms)
+const _adminFailsGlobal = { windowStart: 0, count: 0 };
 function adminAuth(req, res, next) {
     if (!config.adminToken) return res.status(503).json({ error: 'Admin endpoints disabled (no ADMIN_TOKEN set)' });
     const now = Date.now();
     const ip = ipBucket(req.ip);
+    const knownGood = now - (_adminGoodIps.get(ip) || 0) < ADMIN_KNOWN_GOOD_MS;
+
     const fails = _adminFailsByIp.get(ip);
     if (fails && now - fails.windowStart < ADMIN_FAIL_WINDOW_MS && fails.count >= ADMIN_FAILS_PER_WINDOW) {
         return res.status(429).json({ error: 'Too many failed admin attempts — wait a few minutes' });
     }
+    if (now - _adminFailsGlobal.windowStart >= ADMIN_FAIL_WINDOW_MS) {
+        _adminFailsGlobal.windowStart = now;
+        _adminFailsGlobal.count = 0;
+    }
+    if (!knownGood && _adminFailsGlobal.count >= ADMIN_GLOBAL_FAILS_PER_WINDOW) {
+        db.bumpMetric('admin.brake');
+        return res.status(429).json({ error: 'Admin authentication temporarily locked — try again later' });
+    }
+
     const given = crypto.createHash('sha256').update(req.get('x-admin-token') || '').digest();
     const want = crypto.createHash('sha256').update(config.adminToken).digest();
     if (!crypto.timingSafeEqual(given, want)) {
         capLimiter(_adminFailsByIp, (v) => now - v.windowStart >= ADMIN_FAIL_WINDOW_MS);
+        capLimiter(_adminGoodIps, (v) => now - v >= ADMIN_KNOWN_GOOD_MS);
         if (!fails || now - fails.windowStart >= ADMIN_FAIL_WINDOW_MS) {
             _adminFailsByIp.set(ip, { windowStart: now, count: 1 });
         } else {
             fails.count++;
         }
+        _adminFailsGlobal.count++;
+        db.bumpMetric('admin.fail');
         return res.status(401).json({ error: 'Bad admin token' });
     }
     _adminFailsByIp.delete(ip);
+    _adminGoodIps.set(ip, now);
     next();
 }
 
@@ -458,7 +491,7 @@ app.post('/v1/llm/chat/completions', auth, async (req, res) => {
             // chatStream owns the response from here (SSE passthrough).
             const { usage } = await llm.chatStream(model, req.body, res);
             meterLlm(installId, usage);
-            if (!usage.completion_tokens) db.bumpMetric('llm.stream.nousage');
+            if (usage.estimated) db.bumpMetric('llm.stream.estimated');
         } else {
             const { json, usage } = await llm.chat(model, req.body);
             meterLlm(installId, usage);
@@ -481,7 +514,9 @@ app.post('/v1/llm/chat/completions', auth, async (req, res) => {
 
 // A request is metered even when a stream lost its usage chunk (client
 // disconnected early) — the request bucket is what the app's meter shows,
-// and a started generation was real work.
+// and a started generation was real work. In that case llm.chatStream
+// returns an ESTIMATE rather than zeros, so tokens (the ceiling that
+// actually bounds spend) can't be walked past by disconnecting early.
 function meterLlm(installId, usage) {
     db.bumpLlmUsage(installId, usage.prompt_tokens || 0, usage.completion_tokens || 0);
     db.bumpMetric('llm.ok');
@@ -527,20 +562,39 @@ const ANALYTICS_MAX_DISTINCT = 100; // distinct counters one request may create
 
 // The app posts from the renderer, where CORS applies (the old Worker sent
 // these same headers). Wide-open is fine: the endpoint only accepts counts.
-function analyticsCors(res) {
-    res.set('Access-Control-Allow-Origin', '*');
+// CORS for the two keyless ingests. This echoed '*', which let ANY website
+// make its visitors POST here — these bodies are JSON, so the browser
+// preflights, and a permissive reply is exactly what turns that preflight
+// into a write. The app posts from its renderer, which loads over file://
+// and so sends `Origin: null`; native/main-process callers send no Origin
+// at all and CORS never applies to them.
+//
+// `null` is NOT an identity — a sandboxed iframe or a data: URL presents it
+// too — so this raises the bar rather than sealing the door; the per-IP
+// rate limits stay the real brake on volume. INGEST_ALLOWED_ORIGINS exists
+// for a future web client that would have a real origin.
+const INGEST_ORIGINS = new Set(['null', ...(process.env.INGEST_ALLOWED_ORIGINS || '')
+    .split(',').map((s) => s.trim()).filter(Boolean)]);
+function analyticsCors(req, res) {
+    const origin = req.get('origin');
+    res.set('Vary', 'Origin');
+    // No Origin: a native client, not a browser — nothing to grant.
+    // Unknown Origin: no ACAO header, so the browser blocks the response
+    // and (for a preflight) never sends the request at all.
+    if (!origin || !INGEST_ORIGINS.has(origin)) return;
+    res.set('Access-Control-Allow-Origin', origin);
     res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.set('Access-Control-Allow-Headers', 'Content-Type');
     res.set('Access-Control-Max-Age', '86400');
 }
 
 app.options('/v1/analytics/events', (req, res) => {
-    analyticsCors(res);
+    analyticsCors(req, res);
     res.sendStatus(204);
 });
 
 app.post('/v1/analytics/events', (req, res) => {
-    analyticsCors(res);
+    analyticsCors(req, res);
     const installId = String(req.body?.installId || '').trim();
     if (!/^[A-Za-z0-9_-]{8,64}$/.test(installId)) {
         db.bumpMetric('analytics.reject');
@@ -604,12 +658,12 @@ app.post('/v1/analytics/events', (req, res) => {
 // that is the entire point, and pressing Send is the consent. An optional
 // email rides along only if the user typed one, for replies.
 app.options('/v1/feedback', (req, res) => {
-    analyticsCors(res);
+    analyticsCors(req, res);
     res.sendStatus(204);
 });
 
 app.post('/v1/feedback', (req, res) => {
-    analyticsCors(res);
+    analyticsCors(req, res);
     const message = String(req.body?.message || '').trim();
     if (message.length < 3) return res.status(400).json({ error: 'message required' });
     if (message.length > 4000) return res.status(400).json({ error: 'message too long (max 4000 chars)' });
@@ -817,6 +871,25 @@ if (require.main === module) {
     if (config.adminToken && config.adminToken.length < 24) {
         console.warn('[config] ADMIN_TOKEN is short — it is the only admin credential; use 24+ random chars');
     }
+    // Retention sweep: once at boot, then daily. Cheap (two indexed
+    // DELETEs), and running it at boot means a long-lived deployment can't
+    // sit years past its stated retention because nothing restarted it.
+    const purge = () => {
+        if (!config.feedbackRetentionDays && !config.analyticsRetentionDays) return;
+        try {
+            const n = db.purgeOldRows(
+                config.feedbackRetentionDays || 1e6,
+                config.analyticsRetentionDays || 1e6
+            );
+            if (n.feedback || n.analytics) {
+                console.log(`[retention] purged ${n.feedback} feedback, ${n.analytics} analytics rows`);
+            }
+        } catch (e) {
+            console.error(`[retention] purge failed: ${e.message}`);
+        }
+    };
+    purge();
+    setInterval(purge, 24 * 60 * 60 * 1000).unref();
     const server = app.listen(config.port, () => {
         console.log(`anjadhe-connect listening on :${config.port} — providers: ${router.available().join(', ') || 'NONE CONFIGURED'}`);
     });

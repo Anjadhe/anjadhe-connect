@@ -245,10 +245,26 @@ async function main() {
     r = await get('/v1/admin/analytics?days=7', { 'x-admin-token': 'wrong' });
     assert.strictEqual(r.status, 401);
 
-    // CORS preflight (the app posts from the Electron renderer)
-    const pre = await fetch(base + '/v1/analytics/events', { method: 'OPTIONS' });
+    // CORS preflight. The app posts from the Electron renderer, which loads
+    // over file:// and so sends Origin: null — that is granted. Any other
+    // browser origin gets NO allow-origin header, so a random website can't
+    // make its visitors write here (these bodies are JSON, hence preflighted).
+    const pre = await fetch(base + '/v1/analytics/events', {
+        method: 'OPTIONS', headers: { Origin: 'null' }
+    });
     assert.strictEqual(pre.status, 204);
-    assert.strictEqual(pre.headers.get('access-control-allow-origin'), '*');
+    assert.strictEqual(pre.headers.get('access-control-allow-origin'), 'null');
+
+    const evil = await fetch(base + '/v1/analytics/events', {
+        method: 'OPTIONS', headers: { Origin: 'https://evil.example' }
+    });
+    assert.strictEqual(evil.headers.get('access-control-allow-origin'), null);
+
+    // A native client sends no Origin at all — CORS never applies to it, so
+    // the absence of the header must not stop the request itself.
+    const native = await post('/v1/analytics/events',
+        { installId: 'analytics-uuid-0001', events: [] });
+    assert.strictEqual(native.status, 200);
 
     // observability: daily counters, actives, provider status, alerts —
     // all aggregate, nothing per-request
