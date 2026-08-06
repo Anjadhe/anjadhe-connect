@@ -173,23 +173,25 @@ async function main() {
             { name: 'app.opened', ts: now, props: { app: 'email' } },
             { name: 'app.opened', ts: fiveDaysAgo, props: { app: 'notes' } },
             { name: 'agent.query.sent', ts: now, props: { model: 'qwen3:14b', junk: 'dropped' } },
+            { name: 'model.added', ts: now, props: { engine: 'anjadhe', source: 'wizard' } },
             { name: 'schedule.task_completed', ts: now - 400 * 86400000 },  // ancient ts → today
             { name: 'not.in.vocabulary', ts: now },                          // dropped
             { name: 'app.opened', ts: now, props: { app: 'x|y&z' } }         // value sanitized
         ]
     });
     assert.strictEqual(r.status, 200, JSON.stringify(r.body));
-    assert.strictEqual(r.body.accepted, 6);
+    assert.strictEqual(r.body.accepted, 7);
     assert.strictEqual(r.body.dropped, 1);
 
     r = await get('/v1/admin/overview?days=7', { 'x-admin-token': 'test-admin' });
     const an = r.body.analytics;
-    assert.strictEqual(an.daily.reduce((s, d) => s + d.n, 0), 6);
+    assert.strictEqual(an.daily.reduce((s, d) => s + d.n, 0), 7);
     assert.strictEqual(an.daily.length, 2); // today + the 5-days-ago bucket
     const top = Object.fromEntries(an.top.map(t => [t.name, t.n]));
     assert.strictEqual(top['app.opened|app=email'], 2);
     assert.strictEqual(top['app.opened|app=notes'], 1);
     assert.strictEqual(top['agent.query.sent|model=qwen3:14b'], 1); // junk prop dropped
+    assert.strictEqual(top['model.added|engine=anjadhe|source=wizard'], 1);
     assert.strictEqual(top['schedule.task_completed'], 1);
     assert.strictEqual(top['app.opened|app=x_y_z'], 1);
     assert.ok(!('not.in.vocabulary' in top));
@@ -208,9 +210,9 @@ async function main() {
     const grid = r.body.installs;
     assert.strictEqual(grid.length, 2);
     assert.strictEqual(grid[0].installId, sha('analytics-uuid-0001'));
-    assert.strictEqual(grid[0].total, 6);
+    assert.strictEqual(grid[0].total, 7);
     assert.strictEqual(grid[0].activeDays, 2);
-    assert.strictEqual(grid[0].byDay[db.day()], 5);              // 5 today, 1 five days back
+    assert.strictEqual(grid[0].byDay[db.day()], 6);              // 6 today, 1 five days back
     assert.strictEqual(grid[0].byDay[db.daysAgo(5)], 1);
     assert.strictEqual(grid[1].total, 1);
     // analytics ids are their own id space — never a Connect install id
@@ -225,8 +227,8 @@ async function main() {
     r = await get('/v1/admin/analytics/install?id=' + sha('analytics-uuid-0001') + '&days=7',
         { 'x-admin-token': 'test-admin' });
     assert.strictEqual(r.status, 200);
-    assert.strictEqual(r.body.total, 6);
-    assert.strictEqual(r.body.events.length, 5);                 // 5 distinct counters
+    assert.strictEqual(r.body.total, 7);
+    assert.strictEqual(r.body.events.length, 6);                 // 6 distinct counters
     assert.strictEqual(r.body.events[0].day, db.day());           // newest day first
     assert.ok(r.body.events.some(e => e.name === 'app.opened|app=notes' && e.n === 1));
     // a raw (unhashed) id is not a lookup key here — nothing raw is at rest

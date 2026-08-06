@@ -451,6 +451,7 @@ const ANALYTICS_VOCABULARY = {
     'email.analyzed': ['result', 'model'],
     'email.action_synced': [],
     'agent.query.sent': ['model'],
+    'model.added': ['engine', 'source'],
     'agent.reply.feedback': ['rating'],
     'goal.status_updated': [],
     'schedule.task_completed': [],
