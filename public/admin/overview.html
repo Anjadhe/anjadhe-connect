@@ -53,6 +53,15 @@
       </div>
       <div class="plot"></div><div class="table-wrap hidden"></div>
     </div>
+    <div class="card chart-card" id="card-llm">
+      <div class="head"><h2>AI requests per day</h2><button data-toggle="llm">table</button></div>
+      <div class="legend">
+        <span><i style="background:var(--series-1)"></i>served</span>
+        <span><i style="background:var(--status-warn)"></i>&#9888; blocked (quota/rate/busy)</span>
+        <span><i style="background:var(--status-crit)"></i>&#10007; upstream failed</span>
+      </div>
+      <div class="plot"></div><div class="table-wrap hidden"></div>
+    </div>
     <div class="card chart-card" id="card-mints">
       <div class="head"><h2>Key mints per day</h2><button data-toggle="mints">table</button></div>
       <div class="legend">
@@ -111,6 +120,7 @@ function render() {
   renderAlerts();
   renderTiles(byDay);
   renderSearches(byDay);
+  renderLlm(byDay);
   renderMints(byDay);
   renderLatency(byDay);
   renderProviders();
@@ -146,6 +156,10 @@ function renderTiles(byDay) {
     { label: 'Total installs', value: fmt(overview.keys), note: overview.tiers.map(t => `${t.n} ${t.tier}`).join(' · ') },
     { label: 'Blocked today', value: fmt(val(byDay, today, 'search.quota') + val(byDay, today, 'search.rate')), note: 'quota + rate limits, UTC day' },
     { label: 'Upstream fail rate today', value: failRate, note: `${fmt(provFail)} of ${fmt(provOk + provFail)} calls, UTC day` },
+    { label: 'AI requests this month', value: fmt(overview.llm?.requests ?? 0),
+      note: overview.llm?.budgetTokens
+        ? `${fmt(overview.llm.tokens)} / ${fmt(overview.llm.budgetTokens)} tokens`
+        : `${fmt(overview.llm?.tokens ?? 0)} tokens (no budget cap)` },
     { label: 'Analytics installs (7d)', value: fmt(overview.analytics?.actives?.last7d ?? 0), note: 'opt-in — details on Analytics' },
     { label: 'New feedback', value: fmt(fb.new), note: `${fmt(fb.total)} total — read on Feedback`, href: '/admin/feedback' },
     { label: 'Relay connections now', value: fmt((overview.relay?.hosts ?? 0) + (overview.relay?.clients ?? 0)),
@@ -167,6 +181,28 @@ function renderSearches(byDay) {
   columnChart($('#card-searches .plot'), days, series, byDay);
   dataTable($('#card-searches .table-wrap'), ['Day', 'Served', 'Quota', 'Rate', 'Failed'],
     days.map(d => [d, ...series.map(s => val(byDay, d, s.name))]).reverse());
+}
+
+function renderLlm(byDay) {
+  const days = dayList(overview.day);
+  // Blocked reasons fold into one bar; the table keeps tokens per day.
+  const lByDay = {};
+  for (const d of days) {
+    lByDay[d] = {
+      'llm.ok': val(byDay, d, 'llm.ok'),
+      'llm.blocked': val(byDay, d, 'llm.quota') + val(byDay, d, 'llm.rate') + val(byDay, d, 'llm.busy'),
+      'llm.upstream_fail': val(byDay, d, 'llm.upstream_fail')
+    };
+  }
+  const series = [
+    { name: 'llm.ok', label: 'served', color: 'var(--series-1)' },
+    { name: 'llm.blocked', label: 'blocked', color: 'var(--status-warn)' },
+    { name: 'llm.upstream_fail', label: 'upstream failed', color: 'var(--status-crit)' }
+  ];
+  columnChart($('#card-llm .plot'), days, series, lByDay);
+  dataTable($('#card-llm .table-wrap'), ['Day', 'Served', 'Blocked', 'Failed', 'Tokens'],
+    days.map(d => [d, lByDay[d]['llm.ok'], lByDay[d]['llm.blocked'],
+      lByDay[d]['llm.upstream_fail'], fmt(val(byDay, d, 'llm.tokens'))]).reverse());
 }
 
 function renderMints(byDay) {

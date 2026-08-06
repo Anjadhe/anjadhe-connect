@@ -11,9 +11,12 @@ const path = require('path');
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 
 process.env.SEARCH_MOCK = '1';
+process.env.LLM_MOCK = '1'; // every mock chat call: 10 tokens in, 5 out
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'connect-test-'));
 process.env.ADMIN_TOKEN = 'test-admin';
 process.env.TIER_QUOTAS = '{"free":3,"plus":5}';
+process.env.LLM_TIER_QUOTAS = '{"free":{"requests":2,"tokens":1000},"plus":{"requests":50,"tokens":1000}}';
+process.env.LLM_BUDGET_TOKENS = '60'; // trips after the 4th mock call (4 × 15)
 process.env.PROVIDER_PACE_MS = '{"mock":150}';
 
 const app = require('../server');
@@ -401,6 +404,98 @@ async function main() {
     r = await get('/v1/admin/overview?days=7', { 'x-admin-token': 'test-admin' });
     assert.strictEqual(r.body.feedback.new, 1);
     assert.strictEqual(r.body.feedback.total, 2);
+
+    // ── LLM inference: metered OpenAI-compatible proxy ──────────────────
+    // healthz names the public models
+    r = await get('/healthz');
+    assert.deepStrictEqual(r.body.llmModels, ['anjadhe-cloud']);
+
+    const chatBody = { model: 'anjadhe-cloud', messages: [{ role: 'user', content: 'hi' }] };
+    // auth + validation
+    r = await post('/v1/llm/chat/completions', chatBody);
+    assert.strictEqual(r.status, 401);
+    r = await post('/v1/llm/chat/completions', { ...chatBody, model: 'gpt-4' }, bearer(key2));
+    assert.strictEqual(r.status, 400);
+    assert.strictEqual(r.body.code, 'model');
+    r = await post('/v1/llm/chat/completions', { model: 'anjadhe-cloud', messages: [] }, bearer(key2));
+    assert.strictEqual(r.status, 400);
+
+    // non-stream: OpenAI shape through, usage metered (15 tokens)
+    r = await post('/v1/llm/chat/completions', chatBody, bearer(key2));
+    assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+    assert.ok(r.body.choices[0].message.content.length > 0);
+    assert.strictEqual(r.body.usage.total_tokens, 15);
+    r = await get('/v1/usage', bearer(key2));
+    assert.strictEqual(r.body.llm.requests, 1);
+    assert.strictEqual(r.body.llm.tokens, 15);
+    assert.strictEqual(r.body.llm.requestQuota, 2);
+
+    // stream: SSE passthrough, usage chunk still metered
+    const sse = await fetch(base + '/v1/llm/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...bearer(key2) },
+        body: JSON.stringify({ ...chatBody, stream: true })
+    });
+    assert.strictEqual(sse.status, 200);
+    assert.match(sse.headers.get('content-type'), /text\/event-stream/);
+    const sseText = await sse.text();
+    assert.ok(sseText.includes('"content":"Canned "'));
+    assert.ok(sseText.includes('[DONE]'));
+    r = await get('/v1/usage', bearer(key2));
+    assert.strictEqual(r.body.llm.requests, 2);
+    assert.strictEqual(r.body.llm.tokens, 30);
+
+    // third call hits the free request quota (2)
+    r = await post('/v1/llm/chat/completions', chatBody, bearer(key2));
+    assert.strictEqual(r.status, 429);
+    assert.strictEqual(r.body.code, 'quota');
+    assert.ok(r.body.resetsAt);
+
+    // upgrade unblocks the install…
+    r = await post('/v1/admin/tier', { installId: 'uuid-1111-2222-3333', tier: 'plus' }, { 'x-admin-token': 'test-admin' });
+    assert.strictEqual(r.status, 200);
+    r = await post('/v1/llm/chat/completions', chatBody, bearer(key2)); // 45 tokens
+    assert.strictEqual(r.status, 200);
+    r = await post('/v1/llm/chat/completions', chatBody, bearer(key2)); // 60 tokens
+    assert.strictEqual(r.status, 200);
+
+    // …but the service-wide token budget (60) is the hard ceiling
+    r = await post('/v1/llm/chat/completions', chatBody, bearer(key2));
+    assert.strictEqual(r.status, 503);
+    assert.strictEqual(r.body.code, 'budget');
+
+    // the upstream body is BUILT from a whitelist, never passed through:
+    // the app's think-off hint survives, smuggled upstream knobs (logprobs,
+    // user tags) are dropped, and max_tokens is clamped to the deploy cap
+    {
+        const { buildBody } = require('../lib/llm');
+        const built = buildBody({
+            messages: [{ role: 'user', content: 'x' }],
+            chat_template_kwargs: { enable_thinking: false },
+            temperature: 0.2,
+            logprobs: true, user: 'tracking-tag', max_tokens: 999999
+        }, 'anjadhe-cloud', false);
+        assert.deepStrictEqual(built.chat_template_kwargs, { enable_thinking: false });
+        assert.strictEqual(built.temperature, 0.2);
+        assert.ok(!('logprobs' in built) && !('user' in built));
+        assert.strictEqual(built.max_tokens, 2048); // LLM_MAX_OUTPUT_TOKENS default
+    }
+
+    // observability: period totals, daily counters, budget alert — and
+    // nothing anywhere carrying what was asked
+    r = await get('/v1/admin/overview?days=7', { 'x-admin-token': 'test-admin' });
+    assert.deepStrictEqual(r.body.llm, { models: ['anjadhe-cloud'], requests: 4, tokens: 60, budgetTokens: 60 });
+    assert.strictEqual(r.body.llmTierQuotas.free.requests, 2);
+    const lm = {};
+    for (const row of r.body.metrics) lm[row.name] = (lm[row.name] || 0) + row.n;
+    assert.strictEqual(lm['llm.ok'], 4);
+    assert.strictEqual(lm['llm.tokens'], 60);
+    assert.strictEqual(lm['llm.quota'], 1);
+    assert.strictEqual(lm['llm.budget'], 1);
+    assert.ok(lm['llm.ms.lt2000'] >= 1);
+    assert.ok(r.body.alerts.some(a => a.id === 'llm-budget-spent'));
+    r = await get('/v1/admin/stats', { 'x-admin-token': 'test-admin' });
+    assert.deepStrictEqual(r.body.llmThisPeriod, { requests: 4, tokens: 60 });
 
     // ── router pacing: PROVIDER_PACE_MS spaces upstream call starts ─────
     // (config was loaded with {"mock":150} — see env at the top.) Three

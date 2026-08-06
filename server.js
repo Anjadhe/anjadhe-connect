@@ -1,7 +1,7 @@
 // Anjadhe Connect — hosted services for the Anjadhe app (api.anjadhe.com).
-// First capability: /v1/search, a metered web-search API for agents. Future
-// capabilities (sync relay, LLM inference) join as new /v1/* routes on the
-// same key/tier/usage machinery.
+// Capabilities: /v1/search (metered web search), /v1/llm (metered LLM
+// inference), /v1/news, the analytics/feedback ingests and the sync relay —
+// all riding one key/tier/usage machinery.
 //
 // PRIVACY INVARIANT (this is the product): query text is never logged and
 // never stored. Request logs carry method/path/status/latency only; SQLite
@@ -18,17 +18,23 @@ const db = require('./lib/db');
 const router = require('./lib/router');
 const alerts = require('./lib/alerts');
 const relay = require('./lib/relay');
+const llm = require('./lib/llm');
 
 const KEY_PREFIX = 'anck_';
 
 const app = express();
 app.set('trust proxy', 1); // Railway terminates TLS in front of us
 // Analytics batches (up to 500 queued events from an offline machine) need
-// more room than every other body; keep the tight cap for the rest.
+// more room than every other body, and LLM chat bodies carry whole
+// conversations plus injected context; keep the tight cap for the rest.
 const jsonBody = express.json({ limit: '10kb' });
 const jsonBodyAnalytics = express.json({ limit: '64kb' });
-app.use((req, res, next) =>
-    (req.path === '/v1/analytics/events' ? jsonBodyAnalytics : jsonBody)(req, res, next));
+const jsonBodyLlm = express.json({ limit: '256kb' });
+app.use((req, res, next) => {
+    const parser = req.path === '/v1/analytics/events' ? jsonBodyAnalytics
+        : req.path.startsWith('/v1/llm/') ? jsonBodyLlm : jsonBody;
+    return parser(req, res, next);
+});
 
 // Request log: path only — request bodies (queries) never appear here.
 app.use((req, res, next) => {
@@ -56,6 +62,10 @@ function resetsAt() {
 
 function quotaFor(tier) {
     return config.tierQuotas[tier] ?? config.tierQuotas.free;
+}
+
+function llmQuotaFor(tier) {
+    return config.llmTierQuotas[tier] ?? config.llmTierQuotas.free;
 }
 
 // ── In-memory rate limiters ─────────────────────────────────────────────
@@ -129,6 +139,37 @@ function allowFeedbackHour(ip) {
     return true;
 }
 
+const _llmByInstall = new Map(); // installId -> {windowStart, count}
+function allowLlmMinute(installId, tier) {
+    if (_llmByInstall.size > 10000) _llmByInstall.clear();
+    const limit = config.llmPerMinute[tier] ?? config.llmPerMinute.free;
+    const now = Date.now();
+    const cur = _llmByInstall.get(installId);
+    if (!cur || now - cur.windowStart >= 60000) {
+        _llmByInstall.set(installId, { windowStart: now, count: 1 });
+        return true;
+    }
+    if (cur.count >= limit) return false;
+    cur.count++;
+    return true;
+}
+
+// In-flight LLM calls per install. Streams hold a slot for their whole
+// duration, so this — not the per-minute window — is what stops one
+// install fanning out parallel long-running generations.
+const _llmInflight = new Map(); // installId -> count
+function llmSlot(installId, tier) {
+    const limit = config.llmMaxConcurrent[tier] ?? config.llmMaxConcurrent.free;
+    const cur = _llmInflight.get(installId) || 0;
+    if (cur >= limit) return null;
+    _llmInflight.set(installId, cur + 1);
+    return () => {
+        const n = (_llmInflight.get(installId) || 1) - 1;
+        if (n <= 0) _llmInflight.delete(installId);
+        else _llmInflight.set(installId, n);
+    };
+}
+
 const _searchByInstall = new Map(); // installId -> {windowStart, count}
 function allowMinute(installId, tier) {
     if (_searchByInstall.size > 10000) _searchByInstall.clear();
@@ -180,7 +221,7 @@ function adminAuth(req, res, next) {
 // deployment it is showing before any token is entered — the point being that
 // production and staging dashboards are otherwise identical.
 app.get('/healthz', (req, res) => {
-    const body = { ok: true, providers: router.available() };
+    const body = { ok: true, providers: router.available(), llmModels: llm.available() };
     if (config.envLabel) body.env = config.envLabel;
     res.json(body);
 });
@@ -295,6 +336,102 @@ app.post('/v1/news', auth, async (req, res) => {
     }));
     res.json({ topics: out, provider: 'anjadhe' });
 });
+
+// ── LLM inference (metered, OpenAI-compatible) ──────────────────────────
+// The app's 'anjadhe' engine points its normal OpenAI-request path here.
+// Quota is two-dimensional: monthly requests (what the app's meter shows)
+// AND monthly tokens (the cost backstop) — whichever trips first. Errors
+// use Connect's house shape ({error, code}), which the app's engine maps
+// to its own quota/rate handling.
+app.post('/v1/llm/chat/completions', auth, async (req, res) => {
+    const models = llm.available();
+    if (!models.length) {
+        return res.status(503).json({ error: 'LLM inference is not configured on this deployment', code: 'unconfigured' });
+    }
+    const model = String(req.body?.model || '');
+    if (!models.includes(model)) {
+        return res.status(400).json({ error: `Unknown model — one of: ${models.join(', ')}`, code: 'model', models });
+    }
+    if (!Array.isArray(req.body?.messages) || !req.body.messages.length) {
+        return res.status(400).json({ error: 'messages required', code: 'request' });
+    }
+
+    const { install_id: installId, tier } = req.install;
+    const quota = llmQuotaFor(tier);
+    const used = db.llmUsed(installId);
+    if (used.requests >= quota.requests || used.tokens >= quota.tokens) {
+        db.bumpMetric('llm.quota');
+        return res.status(429).json({
+            error: `Monthly AI quota reached on the ${tier} plan. Resets ${resetsAt()}.`,
+            code: 'quota',
+            used: used.requests, quota: quota.requests,
+            tokensUsed: used.tokens, tokenQuota: quota.tokens,
+            resetsAt: resetsAt()
+        });
+    }
+    // Service-wide budget breaker — the deploy's hard cost ceiling. Enforced
+    // before the upstream call so a spent budget costs nothing more.
+    if (config.llmBudgetTokens && db.llmPeriodTotals().tokens >= config.llmBudgetTokens) {
+        db.bumpMetric('llm.budget');
+        return res.status(503).json({
+            error: 'Hosted AI is temporarily unavailable (service capacity reached this month).',
+            code: 'budget', resetsAt: resetsAt()
+        });
+    }
+    if (!allowLlmMinute(installId, tier)) {
+        db.bumpMetric('llm.rate');
+        return res.status(429).json({ error: 'Rate limit: too many AI requests this minute — retry shortly.', code: 'rate' });
+    }
+    const release = llmSlot(installId, tier);
+    if (!release) {
+        db.bumpMetric('llm.busy');
+        return res.status(429).json({ error: 'Too many concurrent AI requests — wait for one to finish.', code: 'busy' });
+    }
+
+    const start = Date.now();
+    const stream = req.body.stream === true;
+    try {
+        if (stream) {
+            // chatStream owns the response from here (SSE passthrough).
+            const { usage } = await llm.chatStream(model, req.body, res);
+            meterLlm(installId, usage);
+            if (!usage.completion_tokens) db.bumpMetric('llm.stream.nousage');
+        } else {
+            const { json, usage } = await llm.chat(model, req.body);
+            meterLlm(installId, usage);
+            db.bumpMetric(llmLatencyBucket(Date.now() - start));
+            res.json(json);
+        }
+    } catch (e) {
+        // e.message never contains request content (llm.js invariant).
+        db.bumpMetric('llm.upstream_fail');
+        console.error(`[llm] upstream failed: ${e.message}`);
+        if (!res.headersSent) {
+            res.status(502).json({ error: 'AI request failed — retry shortly.', code: 'upstream' });
+        } else if (!res.writableEnded) {
+            res.end();
+        }
+    } finally {
+        release();
+    }
+});
+
+// A request is metered even when a stream lost its usage chunk (client
+// disconnected early) — the request bucket is what the app's meter shows,
+// and a started generation was real work.
+function meterLlm(installId, usage) {
+    db.bumpLlmUsage(installId, usage.prompt_tokens || 0, usage.completion_tokens || 0);
+    db.bumpMetric('llm.ok');
+    const total = (usage.prompt_tokens || 0) + (usage.completion_tokens || 0);
+    if (total) db.bumpMetricBy('llm.tokens', total);
+}
+
+function llmLatencyBucket(ms) {
+    if (ms < 2000) return 'llm.ms.lt2000';
+    if (ms < 8000) return 'llm.ms.lt8000';
+    if (ms < 20000) return 'llm.ms.lt20000';
+    return 'llm.ms.gte20000';
+}
 
 // ── App analytics (opt-in, content-free) ────────────────────────────────
 // Ingest for the desktop app's AnalyticsManager (Settings › Privacy, off by
@@ -452,10 +589,18 @@ app.all(['/v1/relay', '/v1/relay/*'], (req, res) => {
 
 app.get('/v1/usage', auth, (req, res) => {
     const { install_id: installId, tier } = req.install;
+    const llmUsed = db.llmUsed(installId);
+    const llmQuota = llmQuotaFor(tier);
     res.json({
         tier,
         used: db.getUsed(installId),
         quota: quotaFor(tier),
+        llm: {
+            requests: llmUsed.requests,
+            requestQuota: llmQuota.requests,
+            tokens: llmUsed.tokens,
+            tokenQuota: llmQuota.tokens
+        },
         period: db.period(),
         resetsAt: resetsAt()
     });
@@ -528,8 +673,14 @@ app.get('/v1/admin/overview', adminAuth, (req, res) => {
             actives: db.analyticsActives()
         },
         providers: router.statusSnapshot(),
+        llm: {
+            models: llm.available(),
+            ...db.llmPeriodTotals(),
+            budgetTokens: config.llmBudgetTokens || null
+        },
         relay: relay.stats(),
         tierQuotas: config.tierQuotas,
+        llmTierQuotas: config.llmTierQuotas,
         installs: db.installList(200),
         feedback: db.feedbackCounts(),
         alerts: alerts.evaluate(),

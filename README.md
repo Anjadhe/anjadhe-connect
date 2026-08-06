@@ -3,10 +3,11 @@
 Hosted services for the [Anjadhe app](https://anjadhe.com), served from
 `api.anjadhe.com`. First capability: a metered **web-search API** so the
 in-app assistant gets web access instantly — no signup, no key-hunting.
-Also hosts the app's **opt-in usage analytics** ingest and the
-**zero-knowledge mobile-sync relay** (both below). Future capabilities
-(hosted LLM inference) join as new `/v1/*` routes on the same key/tier
-machinery.
+Second: metered **LLM inference** (`/v1/llm`) — open-weight models behind
+an OpenAI-compatible endpoint, so the assistant works on machines that
+can't run a capable model locally. Also hosts the app's **opt-in usage
+analytics** ingest and the **zero-knowledge mobile-sync relay** (both
+below). All of it rides one key/tier machinery.
 
 The source is public so the privacy claim below is verifiable.
 
@@ -20,6 +21,15 @@ logs carry method, path, status, and latency only. Searches from all users
 exit through Connect's own upstream accounts and server address, so
 upstream search providers cannot profile individual users — a stronger
 position than each user holding their own provider key.
+
+LLM inference (`/v1/llm`) extends the same invariant to conversations:
+**prompt and completion text are never logged and never stored** — the
+server is a metering passthrough, and the only things written are counters
+(requests and token counts per hashed install id, per month). Requests
+exit through Connect's account with one inference provider chosen for its
+zero-data-retention terms; the provider sees Anjadhe's server, never the
+user. Upstream error bodies are not forwarded or logged, since they can
+echo request text.
 
 App analytics (`/v1/analytics/events`) follow the same discipline: the
 feature is off by default in the app, event names are checked against a
@@ -56,7 +66,8 @@ Auth: `Authorization: Bearer anck_…` (except `/v1/keys`, `/v1/analytics/events
 | `POST /v1/keys` `{installId}` | Mint (or rotate) the key for an installation. Rotation preserves tier and usage — re-minting can't refill a quota. |
 | `POST /v1/keys/migrate` `{newInstallId}` | Rename this key's install id (tier and usage travel with it) — how the app moves legacy hostname-derived ids onto random UUIDs. |
 | `POST /v1/search` `{query, maxResults?}` | Search. Returns `{results: [{title, url, snippet}], provider: "anjadhe", upstream, used, quota}` — the shape the app's other search providers already use. `429` with `code: "quota"` when the month is spent, `code: "rate"` for per-minute limits. |
-| `GET /v1/usage` | `{tier, used, quota, period, resetsAt}` |
+| `POST /v1/llm/chat/completions` | Metered LLM inference, OpenAI-compatible (streaming via SSE with `stream: true`). `model` must be a served public name (`GET /healthz` lists them). Quota is monthly **requests AND tokens**, whichever trips first; `429 code: "quota"` / `"rate"` / `"busy"`, `503 code: "budget"` when the service-wide token budget is spent. |
+| `GET /v1/usage` | `{tier, used, quota, llm: {requests, requestQuota, tokens, tokenQuota}, period, resetsAt}` |
 | `POST /v1/analytics/events` `{installId, events}` | Opt-in app-analytics ingest (keyless — see Privacy). Events outside the vocabulary are dropped; the batch is aggregated into daily counters on arrival. Returns `{accepted, dropped}`. |
 | `wss://…/v1/relay/<routingId>` | Zero-knowledge mobile-sync relay (WebSocket, keyless — see Privacy). Frames are capped at 1 MiB; the app's channel layer chunks larger payloads. Per-IP connect limits and per-connection forwarding budgets apply. |
 | `POST /v1/feedback` `{message, kind?, email?, appVersion?, platform?}` | Feedback / support ingest (keyless — see Privacy). `kind` is `feedback` (default) or `support`; per-IP hourly limit. |
@@ -68,10 +79,14 @@ Auth: `Authorization: Bearer anck_…` (except `/v1/keys`, `/v1/analytics/events
 | `GET /v1/admin/feedback?status=new\|all\|closed&limit=N` | Feedback list + counts. |
 | `POST /v1/admin/feedback/status` `{id, status}` | Move a feedback item between `new` / `read` / `closed`. |
 | `GET /admin` | Operator pages (browser; enter `ADMIN_TOKEN` in the page). `/admin` is service health; `/admin/analytics`, `/admin/installs` and `/admin/feedback` are its siblings. |
-| `GET /healthz` | `{ok, providers}` |
+| `GET /healthz` | `{ok, providers, llmModels}` |
 
 Tiers (defaults, env-tunable): `free` 300 searches/mo, `plus` 3,000,
-`pro` 15,000, with per-minute caps of 20/60/120.
+`pro` 15,000, with per-minute caps of 20/60/120. LLM quotas ride the same
+tier field: `free` 300 requests + 2.5M tokens/mo, `plus` 3,000 + 25M,
+`pro` 15,000 + 100M, with per-minute caps of 10/30/60 and 2/4/6 concurrent
+streams. `LLM_BUDGET_TOKENS` is the service-wide monthly ceiling behind
+all of it.
 
 ## Observability & alerts
 
@@ -197,9 +212,10 @@ leave staging on `main`.
 
 ## Roadmap
 
-- `/v1/relay` — mobile-sync relay.
-- `/v1/llm` — hosted inference; would be an explicit opt-in in the app,
-  never a default.
+- Stripe checkout/webhooks for self-serve tier upgrades (replacing
+  `POST /v1/admin/tier`).
+- Self-hosted inference (own GPUs) if scale ever beats per-token pricing —
+  the `/v1/llm` contract wouldn't change.
 
 ## License
 
