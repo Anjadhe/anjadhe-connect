@@ -497,6 +497,14 @@ async function main() {
     r = await get('/v1/admin/stats', { 'x-admin-token': 'test-admin' });
     assert.deepStrictEqual(r.body.llmThisPeriod, { requests: 4, tokens: 60 });
 
+    // the install list carries per-install LLM usage beside search usage
+    // (how the operator spots one install eating the token budget)
+    r = await get('/v1/admin/overview?days=7', { 'x-admin-token': 'test-admin' });
+    const llmInstall = r.body.installs.find(k => k.install_id === sha('uuid-1111-2222-3333'));
+    assert.strictEqual(llmInstall.llm_requests, 4);
+    assert.strictEqual(llmInstall.llm_tokens, 60);
+    assert.ok(r.body.installs.every(k => 'llm_requests' in k && 'llm_tokens' in k));
+
     // ── router pacing: PROVIDER_PACE_MS spaces upstream call starts ─────
     // (config was loaded with {"mock":150} — see env at the top.) Three
     // concurrent searches must serialize: starts ≥150ms apart, so the

@@ -74,17 +74,19 @@ function render() {
 
 function renderInstalls() {
   const quotas = overview.tierQuotas;
+  const llmQuotas = overview.llmTierQuotas || {};
   const tiers = Object.keys(quotas);
   const rows = overview.installs.map((k) => `<tr>
     <td class="install-id" data-copy="${esc(k.install_id)}" title="click to copy full hash">${esc(k.install_id.slice(0, 12))}…</td>
     <td><select data-install="${esc(k.install_id)}">${tiers.map(t =>
       `<option value="${t}" ${t === k.tier ? 'selected' : ''}>${t}</option>`).join('')}</select></td>
     <td>${fmt(k.used)} / ${fmt(quotas[k.tier] ?? '?')}</td>
+    <td>${k.llm_requests ? `${fmt(k.llm_requests)} / ${fmt(llmQuotas[k.tier]?.requests ?? '?')} · ${fmt(k.llm_tokens)} tok` : '—'}</td>
     <td>${esc((k.created_at || '').slice(0, 10))}</td>
     <td>${esc(k.last_seen_day || '—')}</td>
   </tr>`).join('');
   $('#installs-table').innerHTML =
-    `<tr><th>Install</th><th>Tier</th><th>Used / quota</th><th>Created (UTC)</th><th>Last seen (UTC)</th></tr>` + rows;
+    `<tr><th>Install</th><th>Tier</th><th>Searches / quota</th><th>AI requests / quota</th><th>Created (UTC)</th><th>Last seen (UTC)</th></tr>` + rows;
   $('#installs-table').querySelectorAll('[data-copy]').forEach((td) => {
     td.style.cursor = 'pointer';
     td.addEventListener('click', () => {
