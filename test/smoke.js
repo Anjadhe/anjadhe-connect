@@ -125,8 +125,16 @@ async function main() {
     r = await post('/v1/admin/tier', { installId: 'test-install-0001', tier: 'pro' }, { 'x-admin-token': 'wrong' });
     assert.strictEqual(r.status, 401);
 
-    // re-mint rotates the key but preserves usage and tier
+    // re-minting a known install id is refused — knowing an id must never be
+    // enough to revoke the owner's key (legacy hostname ids are guessable)
     r = await post('/v1/keys', { installId: 'test-install-0001' });
+    assert.strictEqual(r.status, 409);
+    assert.strictEqual(r.body.code, 'already-registered');
+    r = await get('/v1/usage', bearer(key1));
+    assert.strictEqual(r.status, 200); // owner's key untouched by the attempt
+
+    // rotation requires the current key, preserves usage and tier
+    r = await post('/v1/keys/rotate', {}, bearer(key1));
     assert.strictEqual(r.status, 200);
     assert.strictEqual(r.body.rotated, true);
     assert.strictEqual(r.body.tier, 'plus');
@@ -250,8 +258,9 @@ async function main() {
     for (const row of r.body.metrics) m[row.name] = (m[row.name] || 0) + row.n;
     assert.strictEqual(m['search.ok'], 4);
     assert.strictEqual(m['search.quota'], 1);
-    assert.strictEqual(m['mint.new'], 2);    // original + re-mint of the vacated id
+    assert.strictEqual(m['mint.new'], 2);    // original + mint of the vacated id
     assert.strictEqual(m['mint.rotate'], 1);
+    assert.strictEqual(m['mint.blocked'], 1); // the refused known-id re-mint
     assert.strictEqual(m['mint.migrate'], 1);
     assert.ok(m['auth.fail'] >= 2); // bad key + rotated-away key
     assert.strictEqual(m['provider.mock.ok'], 4);

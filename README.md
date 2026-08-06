@@ -63,7 +63,8 @@ Auth: `Authorization: Bearer anck_…` (except `/v1/keys`, `/v1/analytics/events
 
 | Endpoint | What it does |
 |---|---|
-| `POST /v1/keys` `{installId}` | Mint (or rotate) the key for an installation. Rotation preserves tier and usage — re-minting can't refill a quota. |
+| `POST /v1/keys` `{installId}` | Mint the key for a NEW installation. A known install id answers 409 — knowing an id must never be enough to revoke the owner's key. |
+| `POST /v1/keys/rotate` | Rotate this key (Bearer auth — holding the current key proves ownership). Preserves tier and usage, so rotating can't refill a quota. |
 | `POST /v1/keys/migrate` `{newInstallId}` | Rename this key's install id (tier and usage travel with it) — how the app moves legacy hostname-derived ids onto random UUIDs. |
 | `POST /v1/search` `{query, maxResults?}` | Search. Returns `{results: [{title, url, snippet}], provider: "anjadhe", upstream, used, quota}` — the shape the app's other search providers already use. `429` with `code: "quota"` when the month is spent, `code: "rate"` for per-minute limits. |
 | `POST /v1/llm/chat/completions` | Metered LLM inference, OpenAI-compatible (streaming via SSE with `stream: true`). `model` must be a served public name (`GET /healthz` lists them). Quota is monthly **requests AND tokens**, whichever trips first; `429 code: "quota"` / `"rate"` / `"busy"`, `503 code: "budget"` when the service-wide token budget is spent. |

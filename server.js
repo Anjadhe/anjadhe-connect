@@ -19,11 +19,24 @@ const router = require('./lib/router');
 const alerts = require('./lib/alerts');
 const relay = require('./lib/relay');
 const llm = require('./lib/llm');
+const { capLimiter, ipBucket } = require('./lib/limiter');
 
 const KEY_PREFIX = 'anck_';
 
 const app = express();
 app.set('trust proxy', 1); // Railway terminates TLS in front of us
+app.disable('x-powered-by');
+
+// Baseline security headers on every response. HSTS only when the request
+// actually arrived over TLS (Railway terminates it and forwards the proto),
+// so local dev over plain http isn't pinned to https.
+app.use((req, res, next) => {
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.set('X-Frame-Options', 'DENY');
+    res.set('Referrer-Policy', 'no-referrer');
+    if (req.secure) res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    next();
+});
 // Analytics batches (up to 500 queued events from an offline machine) need
 // more room than every other body, and LLM chat bodies carry whole
 // conversations plus injected context; keep the tight cap for the rest.
@@ -72,17 +85,24 @@ function llmQuotaFor(tier) {
 // Single-instance service (Railway + volume), so process memory is the
 // source of truth. A restart resets windows — acceptable at this scale.
 
-const _mintByIp = new Map(); // ip -> {day, count}
-function allowMint(ip) {
-    if (_mintByIp.size > 10000) _mintByIp.clear();
+const _mintByIp = new Map(); // ip bucket -> {day, count}
+const _mintGlobal = { day: '', count: 0 }; // aggregate brake — per-IP scales
+                                           // with the attacker's address pool
+function allowMint(rawIp) {
+    const ip = ipBucket(rawIp);
     const day = new Date().toISOString().slice(0, 10);
+    if (_mintGlobal.day !== day) { _mintGlobal.day = day; _mintGlobal.count = 0; }
+    if (_mintGlobal.count >= config.mintPerDayGlobal) return false;
+    capLimiter(_mintByIp, (v) => v.day !== day);
     const cur = _mintByIp.get(ip);
     if (!cur || cur.day !== day) {
         _mintByIp.set(ip, { day, count: 1 });
+        _mintGlobal.count++;
         return true;
     }
     if (cur.count >= config.mintPerIpPerDay) return false;
     cur.count++;
+    _mintGlobal.count++;
     return true;
 }
 
@@ -91,8 +111,8 @@ function allowMint(ip) {
 const NEWS_PER_MINUTE = 12;
 const _newsByInstall = new Map(); // installId -> {windowStart, count}
 function allowNewsMinute(installId) {
-    if (_newsByInstall.size > 10000) _newsByInstall.clear();
     const now = Date.now();
+    capLimiter(_newsByInstall, (v) => now - v.windowStart >= 60000);
     const cur = _newsByInstall.get(installId);
     if (!cur || now - cur.windowStart >= 60000) {
         _newsByInstall.set(installId, { windowStart: now, count: 1 });
@@ -107,10 +127,11 @@ function allowNewsMinute(installId) {
 // per-IP. Clients batch and post at most hourly; 10/min absorbs a NAT'd
 // office without opening a flood door.
 const ANALYTICS_PER_MINUTE = 10;
-const _analyticsByIp = new Map(); // ip -> {windowStart, count}
-function allowAnalyticsMinute(ip) {
-    if (_analyticsByIp.size > 10000) _analyticsByIp.clear();
+const _analyticsByIp = new Map(); // ip bucket -> {windowStart, count}
+function allowAnalyticsMinute(rawIp) {
+    const ip = ipBucket(rawIp);
     const now = Date.now();
+    capLimiter(_analyticsByIp, (v) => now - v.windowStart >= 60000);
     const cur = _analyticsByIp.get(ip);
     if (!cur || now - cur.windowStart >= 60000) {
         _analyticsByIp.set(ip, { windowStart: now, count: 1 });
@@ -125,10 +146,11 @@ function allowAnalyticsMinute(ip) {
 // office without opening a spam door. Keyless like analytics, so per-IP is
 // the only handle there is.
 const FEEDBACK_PER_HOUR = 5;
-const _feedbackByIp = new Map(); // ip -> {windowStart, count}
-function allowFeedbackHour(ip) {
-    if (_feedbackByIp.size > 10000) _feedbackByIp.clear();
+const _feedbackByIp = new Map(); // ip bucket -> {windowStart, count}
+function allowFeedbackHour(rawIp) {
+    const ip = ipBucket(rawIp);
     const now = Date.now();
+    capLimiter(_feedbackByIp, (v) => now - v.windowStart >= 3600000);
     const cur = _feedbackByIp.get(ip);
     if (!cur || now - cur.windowStart >= 3600000) {
         _feedbackByIp.set(ip, { windowStart: now, count: 1 });
@@ -141,9 +163,9 @@ function allowFeedbackHour(ip) {
 
 const _llmByInstall = new Map(); // installId -> {windowStart, count}
 function allowLlmMinute(installId, tier) {
-    if (_llmByInstall.size > 10000) _llmByInstall.clear();
     const limit = config.llmPerMinute[tier] ?? config.llmPerMinute.free;
     const now = Date.now();
+    capLimiter(_llmByInstall, (v) => now - v.windowStart >= 60000);
     const cur = _llmByInstall.get(installId);
     if (!cur || now - cur.windowStart >= 60000) {
         _llmByInstall.set(installId, { windowStart: now, count: 1 });
@@ -172,9 +194,9 @@ function llmSlot(installId, tier) {
 
 const _searchByInstall = new Map(); // installId -> {windowStart, count}
 function allowMinute(installId, tier) {
-    if (_searchByInstall.size > 10000) _searchByInstall.clear();
     const limit = config.perMinute[tier] ?? config.perMinute.free;
     const now = Date.now();
+    capLimiter(_searchByInstall, (v) => now - v.windowStart >= 60000);
     const cur = _searchByInstall.get(installId);
     if (!cur || now - cur.windowStart >= 60000) {
         _searchByInstall.set(installId, { windowStart: now, count: 1 });
@@ -205,13 +227,33 @@ function auth(req, res, next) {
     next();
 }
 
+// Admin token guard. Failures are rate-limited per IP — the token is the
+// only credential, so guessing at line speed must not be free — and both
+// sides are hashed to equal length before the timing-safe compare, so
+// nothing (not even the token's length) leaks through the comparison.
+const ADMIN_FAILS_PER_WINDOW = 10;
+const ADMIN_FAIL_WINDOW_MS = 15 * 60 * 1000;
+const _adminFailsByIp = new Map(); // ip -> {windowStart, count}
 function adminAuth(req, res, next) {
     if (!config.adminToken) return res.status(503).json({ error: 'Admin endpoints disabled (no ADMIN_TOKEN set)' });
-    const given = Buffer.from(req.get('x-admin-token') || '');
-    const want = Buffer.from(config.adminToken);
-    if (given.length !== want.length || !crypto.timingSafeEqual(given, want)) {
+    const now = Date.now();
+    const ip = ipBucket(req.ip);
+    const fails = _adminFailsByIp.get(ip);
+    if (fails && now - fails.windowStart < ADMIN_FAIL_WINDOW_MS && fails.count >= ADMIN_FAILS_PER_WINDOW) {
+        return res.status(429).json({ error: 'Too many failed admin attempts — wait a few minutes' });
+    }
+    const given = crypto.createHash('sha256').update(req.get('x-admin-token') || '').digest();
+    const want = crypto.createHash('sha256').update(config.adminToken).digest();
+    if (!crypto.timingSafeEqual(given, want)) {
+        capLimiter(_adminFailsByIp, (v) => now - v.windowStart >= ADMIN_FAIL_WINDOW_MS);
+        if (!fails || now - fails.windowStart >= ADMIN_FAIL_WINDOW_MS) {
+            _adminFailsByIp.set(ip, { windowStart: now, count: 1 });
+        } else {
+            fails.count++;
+        }
         return res.status(401).json({ error: 'Bad admin token' });
     }
+    _adminFailsByIp.delete(ip);
     next();
 }
 
@@ -226,12 +268,15 @@ app.get('/healthz', (req, res) => {
     res.json(body);
 });
 
-// Mint (or rotate) the key for an installation. Since 2026-07-28 the app
-// sends a random UUID as the install id (unguessable, so returning a fresh
-// key for a known id is safe); ids minted before that are hostname-derived —
-// guessable — which is why /v1/keys/migrate exists. The raw id is hashed
-// here at the boundary and never stored. Rotation does NOT reset usage
-// (usage keys off the install id), so re-minting can't refill a quota.
+// Mint the key for a NEW installation. Mint-only since 2026-08-05: it used
+// to also rotate a known id's key, which meant knowing an install id was
+// enough to revoke the owner's key and receive a working one at their tier —
+// and legacy hostname-derived ids are guessable by design (that's why
+// /v1/keys/migrate exists). A known id now answers 409; rotation moved to
+// /v1/keys/rotate, where holding the current key proves ownership. A client
+// that genuinely lost its key starts over under a fresh UUID (free tier —
+// the operator restores a paid tier manually). The raw id is hashed here at
+// the boundary and never stored.
 app.post('/v1/keys', (req, res) => {
     const installId = String(req.body?.installId || '').trim();
     if (!/^[A-Za-z0-9_-]{8,64}$/.test(installId)) {
@@ -242,13 +287,28 @@ app.post('/v1/keys', (req, res) => {
         return res.status(429).json({ error: 'Too many key requests from this address today' });
     }
     const idHash = db.hashInstallId(installId);
+    if (db.getKeyByInstall(idHash)) {
+        db.bumpMetric('mint.blocked');
+        return res.status(409).json({
+            error: 'This install id already has a key. Rotate it with POST /v1/keys/rotate (Bearer auth), or mint under a new install id.',
+            code: 'already-registered'
+        });
+    }
     const key = mintKey();
-    const existing = db.getKeyByInstall(idHash);
-    if (existing) db.rotateKey(idHash, hashKey(key));
-    else db.createKey(idHash, hashKey(key));
-    db.bumpMetric(existing ? 'mint.rotate' : 'mint.new');
-    const tier = existing ? existing.tier : 'free';
-    res.json({ apiKey: key, tier, monthlyQuota: quotaFor(tier), rotated: !!existing });
+    db.createKey(idHash, hashKey(key));
+    db.bumpMetric('mint.new');
+    res.json({ apiKey: key, tier: 'free', monthlyQuota: quotaFor('free'), rotated: false });
+});
+
+// Rotate this install's key — holding the current key is the proof of
+// ownership. The old key stops working immediately. Usage and tier stay
+// (usage keys off the install id), so rotating can't refill a quota.
+app.post('/v1/keys/rotate', auth, (req, res) => {
+    const key = mintKey();
+    db.rotateKey(req.install.install_id, hashKey(key));
+    db.bumpMetric('mint.rotate');
+    const tier = req.install.tier;
+    res.json({ apiKey: key, tier, monthlyQuota: quotaFor(tier), rotated: true });
 });
 
 // Rename this key's install id — how the app moves off a legacy
@@ -299,7 +359,10 @@ app.post('/v1/search', auth, async (req, res) => {
         res.json({ results, provider: 'anjadhe', upstream, used: used + 1, quota });
     } catch (e) {
         db.bumpMetric('search.upstream_fail');
-        res.status(502).json({ error: e.message || 'Search failed' });
+        // Fixed message — e.message names upstream providers and their HTTP
+        // statuses, which is operator detail, not client detail (the LLM
+        // route already does it this way). The router logs the specifics.
+        res.status(502).json({ error: 'Search temporarily unavailable — try again shortly.' });
     }
 });
 
@@ -460,6 +523,7 @@ const ANALYTICS_VOCABULARY = {
     'settings.analytics_disabled': []
 };
 const ANALYTICS_MAX_BATCH = 500; // matches the client's MAX_EVENTS buffer
+const ANALYTICS_MAX_DISTINCT = 100; // distinct counters one request may create
 
 // The app posts from the renderer, where CORS applies (the old Worker sent
 // these same headers). Wide-open is fine: the endpoint only accepts counts.
@@ -501,7 +565,9 @@ app.post('/v1/analytics/events', (req, res) => {
         if (!allowedProps) continue;
         let bucket = today;
         const ts = Number(ev.ts);
-        if (Number.isFinite(ts)) {
+        // Range-check before Date: a finite-but-absurd epoch (1e20) makes
+        // toISOString throw, which used to 500 the whole batch.
+        if (Number.isFinite(ts) && ts > 0 && ts < 4102444800000 /* 2100 */) {
             const d = db.day(new Date(ts));
             if (d >= oldest && d <= today) bucket = d;
         }
@@ -513,6 +579,11 @@ app.post('/v1/analytics/events', (req, res) => {
         }
         const name = ev.name + (parts.length ? '|' + parts.join('|') : '');
         const k = `${bucket} ${name}`;
+        // Event NAMES are allowlisted but prop VALUES are free strings that
+        // become part of the counter's row key — without a cap on distinct
+        // counters, a random value per event would write a new row per
+        // event, unbounded. Bumping an existing counter is always fine.
+        if (!counts.has(k) && counts.size >= ANALYTICS_MAX_DISTINCT) continue;
         counts.set(k, (counts.get(k) || 0) + 1);
         accepted++;
     }
@@ -613,7 +684,10 @@ app.get('/v1/usage', auth, (req, res) => {
 app.post('/v1/admin/tier', adminAuth, (req, res) => {
     const installId = String(req.body?.installId || '').trim();
     const tier = String(req.body?.tier || '').trim();
-    if (!(tier in config.tierQuotas)) {
+    // hasOwn, not `in` — `in` walks the prototype chain, so "toString" was
+    // accepted as a tier, and quotaFor() returning a function disabled that
+    // install's quota and rate limits entirely.
+    if (!Object.hasOwn(config.tierQuotas, tier)) {
         return res.status(400).json({ error: `Unknown tier — one of: ${Object.keys(config.tierQuotas).join(', ')}` });
     }
     // Accept either the stored (hashed) id — what the dashboard shows — or a
@@ -697,15 +771,52 @@ app.get('/v1/admin/overview', adminAuth, (req, res) => {
 // token the operator enters, and shared.js carries it between pages.
 const ADMIN_PAGES = { '': 'overview', overview: 'overview', analytics: 'analytics', installs: 'installs', feedback: 'feedback' };
 app.get(['/admin', '/admin/:page'], (req, res, next) => {
-    const page = ADMIN_PAGES[req.params.page || ''];
-    if (!page) return next();
-    res.sendFile(path.join(__dirname, 'public', 'admin', page + '.html'));
+    // hasOwn, not a bare index — '/admin/__proto__' resolved to
+    // Object.prototype, and sendFile on that threw a path-leaking 500.
+    const slug = req.params.page || '';
+    if (!Object.hasOwn(ADMIN_PAGES, slug)) return next();
+    // CSP on the pages that render user-written text (feedback). The inline
+    // scripts these pages use need 'unsafe-inline', so this is defence in
+    // depth, not a wall: it still blocks external script loads, fetch/img
+    // exfiltration to other hosts, and framing.
+    res.set('Content-Security-Policy',
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+        + "img-src 'self' data:; connect-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'");
+    res.sendFile(path.join(__dirname, 'public', 'admin', ADMIN_PAGES[slug] + '.html'));
 });
 app.use('/admin/assets', express.static(path.join(__dirname, 'public', 'admin', 'assets')));
 
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 
+// Terminal error handler. Without one, Express's default prints the full
+// stack trace — absolute filesystem paths included — into the response body
+// whenever NODE_ENV isn't 'production', and nothing in the deploy config
+// guarantees it is set. Body-parser errors keep their 4xx status; anything
+// else is a plain 500 with no internals.
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+    const status = err.status || err.statusCode || 500;
+    if (status >= 500) {
+        db.bumpMetric('server.error');
+        console.error(`[error] ${req.method} ${req.path}: ${err.message}`);
+    }
+    res.status(status).json({ error: status >= 500 ? 'Internal error' : 'Bad request' });
+});
+
 if (require.main === module) {
+    // Cost ceilings ship ON by default (config.js); running uncapped is an
+    // explicit choice and gets named at boot so it can't be an accident.
+    if (config.llmUpstreamUrl && !config.llmBudgetTokens) {
+        console.warn('[config] LLM_BUDGET_TOKENS=0 — /v1/llm has NO service-wide spend ceiling');
+    }
+    for (const [name, k] of Object.entries(config.providerKeys)) {
+        if (k && !config.providerBudgets[name]) {
+            console.warn(`[config] provider ${name} has no PROVIDER_BUDGETS cap — uncapped spend`);
+        }
+    }
+    if (config.adminToken && config.adminToken.length < 24) {
+        console.warn('[config] ADMIN_TOKEN is short — it is the only admin credential; use 24+ random chars');
+    }
     const server = app.listen(config.port, () => {
         console.log(`anjadhe-connect listening on :${config.port} — providers: ${router.available().join(', ') || 'NONE CONFIGURED'}`);
     });
