@@ -83,9 +83,11 @@ Auth: `Authorization: Bearer anck_…` (except `/v1/keys`, `/v1/analytics/events
 
 Tiers (defaults, env-tunable): `free` 300 searches/mo, `plus` 3,000,
 `pro` 15,000, with per-minute caps of 20/60/120. LLM quotas ride the same
-tier field: `free` 300 requests + 2.5M tokens/mo, `plus` 3,000 + 25M,
-`pro` 15,000 + 100M, with per-minute caps of 10/30/60 and 2/4/6 concurrent
-streams. `LLM_BUDGET_TOKENS` is the service-wide monthly ceiling behind
+tier field: `free` 1,000 requests + 2.5M tokens/mo, `plus` 10,000 + 25M,
+`pro` 50,000 + 100M, with per-minute caps of 10/30/60 and 2/4/6 concurrent
+streams. Request caps are generous on purpose — the token ceiling is what
+bounds spend, and the app's ambient email analysis makes hundreds of small
+calls a month that must not starve the user's visible chat allowance. `LLM_BUDGET_TOKENS` is the service-wide monthly ceiling behind
 all of it.
 
 ## Observability & alerts
