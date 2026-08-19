@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect Admin — Feedback</title>
+<!-- User feedback and support requests from the app's Settings › Send
+     feedback card. The one place user-written text appears in this admin —
+     each message was written TO the operator. A row carries no id unless
+     the sender ticked the card's default-off checkbox to attach their
+     analytics id (stored hashed); "usage" on such a row opens that
+     install's analytics drill-down. -->
+<link rel="stylesheet" href="/admin/assets/shared.css">
+</head>
+<body>
+
+<div id="env-banner" class="hidden"></div>
+
+<div id="gate" class="card">
+  <h1>Anjadhe Connect</h1>
+  <p style="color:var(--ink-2); margin-top:6px">Enter the admin token to view the dashboard.</p>
+  <input id="token-input" type="password" placeholder="ADMIN_TOKEN" autocomplete="off">
+  <div class="err" id="gate-err"></div>
+  <button id="token-go">Open dashboard</button>
+</div>
+
+<div id="dash" class="hidden">
+  <header>
+    <h1>Connect Admin</h1>
+    <nav class="admin-nav" id="admin-nav"></nav>
+    <div class="spacer"></div>
+    <div id="refresh-note"></div>
+  </header>
+  <div id="hdr-clock"></div>
+
+  <div id="fb-filters" class="row">
+    <div class="range" id="fb-status-buttons">
+      <button data-status="new" class="on">New</button>
+      <button data-status="all">All</button>
+      <button data-status="closed">Closed</button>
+    </div>
+  </div>
+
+  <div class="fb-list" id="fb-list"></div>
+  <div id="fb-empty" class="hidden"></div>
+</div>
+
+<div id="tooltip"></div>
+
+<script>
+'use strict';
+const PAGE = 'feedback';
+let fbStatus = 'new';
+let data = null;
+</script>
+<script src="/admin/assets/shared.js"></script>
+<script>
+'use strict';
+
+async function loadPage() {
+  data = await api(`/v1/admin/feedback?status=${fbStatus}&limit=200`);
+  render();
+}
+
+function render() {
+  renderClockNote(new Date().toISOString().slice(0, 10), null);
+  navFeedbackBadge(data.counts.new || 0);
+
+  // Counts on the filter chips, so the buttons say what is behind them.
+  const c = data.counts;
+  const labels = { new: `New<span class="n">${fmt(c.new)}</span>`, all: `All<span class="n">${fmt(c.total)}</span>`, closed: `Closed<span class="n">${fmt(c.closed)}</span>` };
+  document.querySelectorAll('#fb-status-buttons button').forEach(b => {
+    b.innerHTML = labels[b.dataset.status];
+  });
+
+  const items = data.items;
+  $('#fb-empty').classList.toggle('hidden', items.length > 0);
+  $('#fb-empty').textContent = fbStatus === 'new'
+    ? 'Nothing new. Feedback and support requests from the app land here.'
+    : 'Nothing here yet.';
+  $('#fb-list').innerHTML = items.map(renderItem).join('');
+
+  document.querySelectorAll('[data-fb-set]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      try {
+        await api('/v1/admin/feedback/status', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: parseInt(btn.dataset.fbId, 10), status: btn.dataset.fbSet })
+        });
+        load();
+      } catch (e) { alert('Update failed: ' + e.message); }
+    });
+  });
+}
+
+function renderItem(f) {
+  const when = new Date(f.created_at);
+  const whenText = isNaN(when) ? f.created_at : when.toLocaleString();
+  const meta = [f.app_version && 'v' + f.app_version, f.platform].filter(Boolean).join(' · ');
+  const actions =
+    (f.status === 'new' ? `<button data-fb-set="read" data-fb-id="${f.id}">Mark read</button>` : '') +
+    (f.status !== 'closed' ? `<button data-fb-set="closed" data-fb-id="${f.id}">Close</button>`
+                           : `<button data-fb-set="new" data-fb-id="${f.id}">Reopen</button>`);
+  return `
+    <div class="fb-item ${f.status === 'new' ? 'is-new' : ''} ${f.status === 'closed' ? 'is-closed' : ''}">
+      <div class="fb-head">
+        <span class="fb-kind ${esc(f.kind)}">${esc(f.kind)}</span>
+        <span class="fb-when">#${f.id} · ${esc(whenText)}</span>
+        ${meta ? `<span class="fb-meta">${esc(meta)}</span>` : ''}
+        ${f.email ? `<span class="fb-email"><a href="mailto:${esc(f.email)}">${esc(f.email)}</a></span>` : ''}
+        ${f.analytics_hash ? `<span class="fb-meta"><a href="/admin/analytics?install=${esc(f.analytics_hash)}" title="The sender attached their analytics id — open this install's usage">usage ${esc(f.analytics_hash.slice(0, 10))}…</a></span>` : ''}
+        <span class="fb-actions">${actions}</span>
+      </div>
+      <div class="fb-msg">${esc(f.message)}</div>
+      ${f.diagnostics ? `<div class="fb-diag">${esc(f.diagnostics)}</div>` : ''}
+    </div>`;
+}
+
+$('#fb-status-buttons').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-status]');
+  if (!btn) return;
+  fbStatus = btn.dataset.status;
+  document.querySelectorAll('#fb-status-buttons button').forEach(b => b.classList.toggle('on', b === btn));
+  load();
+});
+
+initAdminShell();
+</script>
+</body>
+</html>
