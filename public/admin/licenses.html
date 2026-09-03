@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect Admin — Licenses</title>
+<!-- App licenses (lib/license.js): every key the service has minted —
+     self-serve alpha claims from the app's License card, and paid or alpha
+     keys minted here by hand. Each row is an email address given for one
+     purpose: to be issued a license and get it back again on a re-install.
+     The server never emails anyone; a key minted here is copied and sent
+     by the operator. -->
+<link rel="stylesheet" href="/admin/assets/shared.css">
+<style>
+  .lic-class { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; padding: 1px 6px; border: 1px solid var(--color-border); border-radius: 4px; }
+  .lic-key { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; word-break: break-all; color: var(--color-text-quiet); margin-top: 6px; display: none; }
+  .fb-item.is-open .lic-key { display: block; }
+  .lic-form label { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+  .lic-form .sub { font-size: 12px; color: var(--color-text-quiet); }
+  .lic-minted { margin-top: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
+</style>
+</head>
+<body>
+
+<div id="dash" class="hidden">
+  <p class="privacy-note" id="lic-note"></p>
+
+  <div class="row" id="lic-tools">
+    <span id="lic-count" class="muted"></span>
+    <div class="spacer"></div>
+    <button id="lic-csv">Download CSV</button>
+  </div>
+
+  <div class="fb-list" id="lic-list"></div>
+  <div id="lic-empty" class="hidden">No licenses yet. Alpha claims from the app's Settings › License card land here.</div>
+
+  <div class="card" id="lic-form-card">
+    <h2>Mint a license</h2>
+    <div class="lic-form">
+      <label>Email
+        <input id="lic-email" type="email" placeholder="person@example.com" autocomplete="off">
+        <span class="sub">Who it is issued to. The same address and class always returns the same key.</span>
+      </label>
+      <label>Class
+        <select id="lic-class">
+          <option value="paid">paid — one year of updates</option>
+          <option value="alpha">alpha — free for good</option>
+        </select>
+      </label>
+      <label id="lic-until-wrap">Updates until
+        <input id="lic-until" type="date">
+        <span class="sub">Leave empty for one year from today.</span>
+      </label>
+      <div class="row">
+        <div class="spacer"></div>
+        <button id="lic-mint" class="primary">Mint</button>
+      </div>
+      <div class="err" id="lic-err"></div>
+      <div class="lic-minted" id="lic-minted"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+const PAGE = 'licenses';
+let data = null;
+</script>
+<script src="/admin/assets/shared.js"></script>
+<script>
+'use strict';
+
+async function loadPage() {
+  data = await api('/v1/admin/licenses');
+  render();
+}
+
+function render() {
+  renderClockNote(new Date().toISOString().slice(0, 10), null);
+  const note = $('#lic-note');
+  if (!data.enabled) {
+    note.innerHTML = '<b>Licensing is off:</b> LICENSE_SIGNING_KEY is not set on this deploy, so nothing can be minted or claimed.';
+  } else {
+    note.innerHTML = `Every key this service has issued. Each row is an address a person typed to be issued a license; `
+      + `it exists so a re-install can get the same key back, and for a paid key it is the receipt. Send nothing else to these addresses. `
+      + `Alpha claim is <b>${data.alphaOpen ? 'open' : 'closed'}</b>${data.alphaClosesAt ? ` (closes ${esc(data.alphaClosesAt)})` : ' (no LICENSE_ALPHA_CLOSES_AT set)'}. `
+      + `Signing public key <code>${esc(data.publicKey)}</code> — must equal the one baked into the app.`;
+  }
+  const items = data.items;
+  const c = data.counts || {};
+  $('#lic-count').textContent = `${fmt(items.length)} license${items.length === 1 ? '' : 's'} · ${fmt(c.alpha || 0)} alpha · ${fmt(c.paid || 0)} paid`;
+  $('#lic-empty').classList.toggle('hidden', items.length > 0);
+  $('#lic-list').innerHTML = items.map(renderItem).join('');
+  document.querySelectorAll('[data-lic-toggle]').forEach(btn => {
+    btn.addEventListener('click', () => btn.closest('.fb-item').classList.toggle('is-open'));
+  });
+  document.querySelectorAll('[data-lic-copy]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(btn.dataset.licCopy);
+        btn.textContent = 'Copied';
+        setTimeout(() => { btn.textContent = 'Copy key'; }, 1500);
+      } catch (e) { alert('Copy failed: ' + e.message); }
+    });
+  });
+  document.querySelectorAll('[data-lic-remove]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm(`Remove the ${btn.dataset.licClass} license for ${btn.dataset.licEmail}? The key they hold keeps working (verification is offline); this only forgets the row.`)) return;
+      try {
+        await api('/v1/admin/licenses/remove', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: btn.dataset.licRemove })
+        });
+        load();
+      } catch (e) { alert('Remove failed: ' + e.message); }
+    });
+  });
+}
+
+function renderItem(l) {
+  const when = new Date(l.created_at);
+  const whenText = isNaN(when) ? l.created_at : when.toLocaleDateString();
+  const until = l.class === 'alpha' ? 'updates forever' : `updates until ${esc(l.updates_until || '?')}`;
+  return `
+    <div class="fb-item">
+      <div class="fb-head">
+        <span class="fb-email"><a href="mailto:${esc(l.email)}">${esc(l.email)}</a> <span class="lic-class">${esc(l.class)}</span></span>
+        <span class="fb-when">${esc(whenText)} · ${until}${l.source ? ' · ' + esc(l.source) : ''}${l.app_version ? ' · v' + esc(l.app_version) : ''}</span>
+        <span class="fb-actions">
+          <button data-lic-toggle>Show key</button>
+          <button data-lic-copy="${esc(l.license)}">Copy key</button>
+          <button data-lic-remove="${esc(l.id)}" data-lic-email="${esc(l.email)}" data-lic-class="${esc(l.class)}">Remove</button>
+        </span>
+      </div>
+      <div class="lic-key">${esc(l.license)}</div>
+    </div>`;
+}
+
+$('#lic-class').addEventListener('change', () => {
+  $('#lic-until-wrap').classList.toggle('hidden', $('#lic-class').value !== 'paid');
+});
+
+$('#lic-mint').addEventListener('click', async () => {
+  const err = $('#lic-err'); err.textContent = '';
+  const out = $('#lic-minted'); out.textContent = '';
+  const body = { email: $('#lic-email').value.trim(), class: $('#lic-class').value };
+  if (body.class === 'paid' && $('#lic-until').value) body.updatesUntil = $('#lic-until').value;
+  try {
+    const r = await api('/v1/admin/licenses', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    out.textContent = (r.created ? 'Minted: ' : 'Already issued, same key: ') + r.item.license;
+    $('#lic-email').value = '';
+    load();
+  } catch (e) { err.textContent = e.message; }
+});
+
+$('#lic-csv').addEventListener('click', () => {
+  if (!data) return;
+  const q = (v) => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+  const csv = ['email,class,issued,updates_until,source,license',
+    ...data.items.map(l => [l.email, l.class, l.created_at.slice(0, 10), l.updates_until || '', l.source || '', l.license].map(q).join(','))].join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+  a.download = `anjadhe-licenses-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+initAdminShell();
+</script>
+</body>
+</html>
