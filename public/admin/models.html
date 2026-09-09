@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect Admin — Models</title>
+<!-- The LLM model catalog (llm_models table) — what /v1/llm/models serves
+     to the app's Settings picker and what the chat route validates against.
+     Managed here since 2026-08-19; the LLM_MODELS env only seeds an empty
+     table on first boot. No user data on this page. -->
+<link rel="stylesheet" href="/admin/assets/shared.css">
+</head>
+<body>
+
+<div id="dash" class="hidden">
+  <p class="privacy-note">
+    The models Anjadhe Cloud offers. The app's picker shows <b>enabled</b> models in this order —
+    the first is preselected. Keep ids on the <code>anjadhe-cloud</code> prefix so app surfaces
+    recognize the engine, and keep <code>anjadhe-cloud</code> itself existing: it is what old apps
+    (and offline ones) add blind. Swapping a model's <i>upstream</i> is invisible to users;
+    disabling or deleting one breaks installs still set to it until they pick another.
+  </p>
+
+  <div id="mdl-warn" class="alert warning hidden"></div>
+
+  <div class="mdl-list" id="mdl-list"></div>
+  <div id="mdl-empty" class="hidden">No models yet — inference is off until one is added.</div>
+
+  <div class="card" id="mdl-form-card">
+    <h2 id="mdl-form-title">Add a model</h2>
+    <div class="mdl-form">
+      <label>Public id
+        <input id="mdl-id" placeholder="anjadhe-cloud-max" autocomplete="off">
+        <span class="sub">The API name apps store — permanent once installs use it.</span>
+      </label>
+      <label>Label
+        <input id="mdl-label" placeholder="Anjadhe Cloud Max" autocomplete="off">
+        <span class="sub">What the app's picker and model list show.</span>
+      </label>
+      <label>Upstream model
+        <input id="mdl-upstream" placeholder="qwen/qwen3-32b" autocomplete="off">
+        <span class="sub">The inference provider's model id — swappable any time.</span>
+      </label>
+      <label>Description
+        <input id="mdl-desc" placeholder="A bigger model for harder questions" autocomplete="off">
+        <span class="sub">One picker line — what it's good at, not specs.</span>
+      </label>
+      <div class="row">
+        <label class="mdl-enabled"><input type="checkbox" id="mdl-enabled" checked> Enabled</label>
+        <div class="spacer"></div>
+        <button id="mdl-cancel" class="hidden">Cancel</button>
+        <button id="mdl-save">Add model</button>
+      </div>
+      <div class="err" id="mdl-err"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+const PAGE = 'models';
+let data = null;
+let editingId = null;
+</script>
+<script src="/admin/assets/shared.js"></script>
+<script>
+'use strict';
+
+async function loadPage() {
+  data = await api('/v1/admin/llm-models');
+  render();
+}
+
+async function write(path, body) {
+  $('#mdl-err').textContent = '';
+  try {
+    data = await api(path, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    render();
+    return true;
+  } catch (e) {
+    $('#mdl-err').textContent = e.message === 'unauthorized' ? '' : 'Save failed: ' + e.message;
+    return false;
+  }
+}
+
+function render() {
+  const models = data.models;
+
+  const warn = $('#mdl-warn');
+  if (data.mock) {
+    warn.innerHTML = '<b>Mock mode (LLM_MOCK=1)</b><span>/v1/llm serves canned responses — this table is ignored until the mock is off.</span>';
+    warn.classList.remove('hidden');
+  } else if (!data.upstreamConfigured) {
+    warn.innerHTML = '<b>No upstream configured</b><span>Set LLM_UPSTREAM_URL and LLM_UPSTREAM_KEY — until then /v1/llm serves nothing, whatever this table says.</span>';
+    warn.classList.remove('hidden');
+  } else {
+    warn.classList.add('hidden');
+  }
+
+  $('#mdl-empty').classList.toggle('hidden', models.length > 0);
+  // The preselect is the first ENABLED row — what the app's picker actually
+  // lands on, not whatever happens to sit at position 0.
+  const preselect = (models.find(m => m.enabled) || {}).id;
+  $('#mdl-list').innerHTML = models.map((m, i) => renderItem(m, i, models.length, preselect)).join('');
+
+  // Row actions: reorder, edit, enable/disable, delete.
+  document.querySelectorAll('[data-mdl-move]').forEach(btn => btn.addEventListener('click', () => {
+    const ids = data.models.map(m => m.id);
+    const i = ids.indexOf(btn.dataset.mdlId);
+    const j = btn.dataset.mdlMove === 'up' ? i - 1 : i + 1;
+    if (j < 0 || j >= ids.length) return;
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+    write('/v1/admin/llm-models/order', { ids });
+  }));
+  document.querySelectorAll('[data-mdl-edit]').forEach(btn => btn.addEventListener('click', () => {
+    startEdit(data.models.find(m => m.id === btn.dataset.mdlEdit));
+  }));
+  document.querySelectorAll('[data-mdl-toggle]').forEach(btn => btn.addEventListener('click', () => {
+    const m = data.models.find(x => x.id === btn.dataset.mdlToggle);
+    write('/v1/admin/llm-models', {
+      id: m.id, upstream: m.upstream, label: m.label,
+      description: m.description || '', enabled: !m.enabled
+    });
+  }));
+  document.querySelectorAll('[data-mdl-delete]').forEach(btn => btn.addEventListener('click', () => {
+    const id = btn.dataset.mdlDelete;
+    if (!confirm(`Delete "${id}"?\n\nInstalls still set to it will get "Unknown model" until they pick another. Disabling is usually the safer move.`)) return;
+    if (editingId === id) resetForm();
+    write('/v1/admin/llm-models/delete', { id });
+  }));
+}
+
+function renderItem(m, i, count, preselect) {
+  return `
+    <div class="mdl-item ${m.enabled ? '' : 'is-off'}">
+      <div class="mdl-order">
+        <button data-mdl-move="up" data-mdl-id="${esc(m.id)}" ${i === 0 ? 'disabled' : ''} title="Move up">&#9650;</button>
+        <button data-mdl-move="down" data-mdl-id="${esc(m.id)}" ${i === count - 1 ? 'disabled' : ''} title="Move down">&#9660;</button>
+      </div>
+      <div class="mdl-info">
+        <div class="mdl-head">
+          <b>${esc(m.label)}</b>
+          <span class="install-id">${esc(m.id)}</span>
+          ${m.id === preselect ? '<span class="badge">app preselect</span>' : ''}
+          ${m.enabled ? '' : '<span class="badge bad">disabled</span>'}
+        </div>
+        <div class="sub">&rarr; <span class="install-id">${esc(m.upstream)}</span>${m.description ? ' · ' + esc(m.description) : ''}</div>
+      </div>
+      <div class="mdl-actions">
+        <button data-mdl-edit="${esc(m.id)}">Edit</button>
+        <button data-mdl-toggle="${esc(m.id)}">${m.enabled ? 'Disable' : 'Enable'}</button>
+        <button data-mdl-delete="${esc(m.id)}">Delete</button>
+      </div>
+    </div>`;
+}
+
+function startEdit(m) {
+  editingId = m.id;
+  $('#mdl-form-title').textContent = `Edit ${m.id}`;
+  $('#mdl-id').value = m.id;
+  $('#mdl-id').disabled = true; // the id is the API — edit everything else
+  $('#mdl-label').value = m.label;
+  $('#mdl-upstream').value = m.upstream;
+  $('#mdl-desc').value = m.description || '';
+  $('#mdl-enabled').checked = !!m.enabled;
+  $('#mdl-save').textContent = 'Save changes';
+  $('#mdl-cancel').classList.remove('hidden');
+  $('#mdl-form-card').scrollIntoView({ block: 'nearest' });
+}
+
+function resetForm() {
+  editingId = null;
+  $('#mdl-form-title').textContent = 'Add a model';
+  $('#mdl-id').value = '';
+  $('#mdl-id').disabled = false;
+  $('#mdl-label').value = '';
+  $('#mdl-upstream').value = '';
+  $('#mdl-desc').value = '';
+  $('#mdl-enabled').checked = true;
+  $('#mdl-save').textContent = 'Add model';
+  $('#mdl-cancel').classList.add('hidden');
+  $('#mdl-err').textContent = '';
+}
+
+$('#mdl-save').addEventListener('click', async () => {
+  const ok = await write('/v1/admin/llm-models', {
+    id: (editingId || $('#mdl-id').value).trim(),
+    label: $('#mdl-label').value.trim(),
+    upstream: $('#mdl-upstream').value.trim(),
+    description: $('#mdl-desc').value.trim(),
+    enabled: $('#mdl-enabled').checked
+  });
+  if (ok) resetForm();
+});
+$('#mdl-cancel').addEventListener('click', resetForm);
+
+initAdminShell();
+</script>
+</body>
+</html>

@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect Admin — Installs</title>
+<!-- Connect installs (API keys): the operator view for manual tier changes.
+     Hashed ids and counts only — never IPs or content. The table is served
+     by /v1/admin/installs: sorted and paged on the server, so it stays
+     truthful ("oldest install", "least active") at any install count. -->
+<link rel="stylesheet" href="/admin/assets/shared.css">
+</head>
+<body>
+
+<div id="dash" class="hidden">
+  <div id="tiles"></div>
+
+  <div class="card" id="installs-card">
+    <div class="head row" style="justify-content:space-between; margin-bottom:6px">
+      <h2 style="margin:0">Installs</h2>
+    </div>
+    <div class="privacy-note">Install ids are stored as SHA-256 hashes — the service never keeps raw machine identifiers. To find a specific install, paste the hash shown in that Mac's Settings &rsaquo; Web Search card into the filter. Click an id to copy the full hash; click a column header to sort. The tier select applies immediately.</div>
+    <div class="table-toolbar">
+      <input id="inst-filter" type="text" spellcheck="false" autocomplete="off" placeholder="Filter by hash prefix…">
+      <div class="spacer"></div>
+      <div class="pager">
+        <span id="inst-count"></span>
+        <button id="inst-prev">&lsaquo; Prev</button>
+        <button id="inst-next">Next &rsaquo;</button>
+      </div>
+    </div>
+    <div class="table-wrap" style="max-height:640px"><table class="data-table" id="installs-table"></table></div>
+  </div>
+</div>
+
+<script>
+'use strict';
+const PAGE = 'installs';
+let overview = null;
+</script>
+<script src="/admin/assets/shared.js"></script>
+<script>
+'use strict';
+
+const PAGE_SIZE = 100;
+// Table state lives here so the shell's 60-second refresh keeps the
+// operator's sort, filter and page instead of snapping back to defaults.
+const inst = { sort: 'usage', dir: 'desc', offset: 0, q: '', data: null };
+
+// key = the server's whitelisted sort key; Install itself is a hash, so
+// sorting by it would order nothing meaningful.
+const COLS = [
+  { key: null,       label: 'Install' },
+  { key: 'tier',     label: 'Tier' },
+  { key: 'searches', label: 'Searches / quota' },
+  { key: 'ai',       label: 'AI requests / quota' },
+  { key: 'created',  label: 'Created' },
+  { key: 'seen',     label: 'Last seen (UTC day)' }
+];
+
+async function loadPage() {
+  const [ov, page] = await Promise.all([api('/v1/admin/overview?days=7'), fetchInstalls()]);
+  overview = ov;
+  inst.data = page;
+  render();
+}
+
+function fetchInstalls() {
+  const p = new URLSearchParams({ sort: inst.sort, dir: inst.dir, limit: PAGE_SIZE, offset: inst.offset });
+  if (inst.q) p.set('q', inst.q);
+  return api('/v1/admin/installs?' + p);
+}
+
+// Re-fetch just the table (sort click, filter keystroke, page turn) — the
+// tiles don't change with it.
+async function refreshInstalls() {
+  try { inst.data = await fetchInstalls(); } catch { return; }
+  renderInstalls();
+}
+
+function render() {
+  renderClockNote(overview.day, overview.period);
+  navFeedbackBadge(overview.feedback?.new || 0);
+  const tiles = [
+    { label: 'Total installs', value: fmt(overview.keys), note: overview.tiers.map(t => `${t.n} ${t.tier}`).join(' · ') },
+    { label: 'Active today', value: fmt(overview.actives.today) },
+    { label: 'Active in 7 days', value: fmt(overview.actives.last7d) },
+    { label: 'Active in 30 days', value: fmt(overview.actives.last30d) },
+    { label: 'Searches this month', value: fmt(overview.searchesThisPeriod), note: `UTC month ${overview.period}` }
+  ];
+  $('#tiles').innerHTML = tiles.map(t =>
+    `<div class="tile"><div class="label">${t.label}</div><div class="value">${t.value}</div>${t.note ? `<div class="note">${t.note}</div>` : ''}</div>`
+  ).join('');
+  renderInstalls();
+}
+
+function renderInstalls() {
+  const quotas = overview.tierQuotas;
+  const llmQuotas = overview.llmTierQuotas || {};
+  const tiers = Object.keys(quotas);
+  const { installs, total, offset } = inst.data;
+
+  const arrow = (key) => key === inst.sort ? (inst.dir === 'desc' ? '▾' : '▴') : '';
+  const head = COLS.map(c => c.key
+    ? `<th class="sortable" data-sort="${c.key}">${c.label} <span class="sort-arrow">${arrow(c.key)}</span></th>`
+    : `<th>${c.label}</th>`).join('');
+
+  const rows = installs.length ? installs.map((k) => `<tr>
+    <td class="install-id" data-copy="${esc(k.install_id)}" title="click to copy full hash">${esc(k.install_id.slice(0, 12))}…</td>
+    <td><select data-install="${esc(k.install_id)}">${tiers.map(t =>
+      `<option value="${t}" ${t === k.tier ? 'selected' : ''}>${t}</option>`).join('')}</select></td>
+    <td>${fmt(k.used)} / ${fmt(quotas[k.tier] ?? '?')}</td>
+    <td>${k.llm_requests ? `${fmt(k.llm_requests)} / ${fmt(llmQuotas[k.tier]?.requests ?? '?')} · ${fmt(k.llm_tokens)} tok` : '—'}</td>
+    <td title="${esc((k.created_at || '') + ' UTC')}">${esc(fmtLocalTime(k.created_at))}</td>
+    <td>${esc(k.last_seen_day || '—')}</td>
+  </tr>`).join('')
+    : `<tr><td colspan="${COLS.length}" class="table-empty">${inst.q ? 'No installs match that prefix.' : 'No installs yet.'}</td></tr>`;
+
+  $('#installs-table').innerHTML = `<tr>${head}</tr>` + rows;
+
+  $('#inst-count').textContent = total
+    ? `${fmt(offset + 1)}–${fmt(offset + installs.length)} of ${fmt(total)}` : '';
+  $('#inst-prev').disabled = offset <= 0;
+  $('#inst-next').disabled = offset + installs.length >= total;
+
+  $('#installs-table').querySelectorAll('[data-copy]').forEach((td) => {
+    td.style.cursor = 'pointer';
+    td.addEventListener('click', () => {
+      navigator.clipboard.writeText(td.dataset.copy);
+      const orig = td.textContent;
+      td.textContent = 'copied';
+      setTimeout(() => { td.textContent = orig; }, 800);
+    });
+  });
+  $('#installs-table').querySelectorAll('select').forEach((sel) => {
+    sel.addEventListener('change', async () => {
+      try {
+        await api('/v1/admin/tier', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ installId: sel.dataset.install, tier: sel.value })
+        });
+        load();
+      } catch (e) { alert('Tier change failed: ' + e.message); }
+    });
+  });
+}
+
+// The controls outlive every re-render (the table's innerHTML is rebuilt,
+// the table element and toolbar are not), so wire them once.
+$('#installs-table').addEventListener('click', (e) => {
+  const th = e.target.closest('th.sortable');
+  if (!th) return;
+  const key = th.dataset.sort;
+  if (key === inst.sort) inst.dir = inst.dir === 'desc' ? 'asc' : 'desc';
+  else { inst.sort = key; inst.dir = 'desc'; }
+  inst.offset = 0;
+  refreshInstalls();
+});
+$('#inst-prev').addEventListener('click', () => {
+  inst.offset = Math.max(0, inst.offset - PAGE_SIZE);
+  refreshInstalls();
+});
+$('#inst-next').addEventListener('click', () => {
+  inst.offset += PAGE_SIZE;
+  refreshInstalls();
+});
+let filterTimer = null;
+$('#inst-filter').addEventListener('input', () => {
+  const el = $('#inst-filter');
+  const v = el.value.trim().toLowerCase();
+  const ok = v === '' || /^[0-9a-f]{1,64}$/.test(v);
+  el.classList.toggle('bad', !ok); // hashes are hex — anything else can't match
+  if (!ok) return;
+  clearTimeout(filterTimer);
+  filterTimer = setTimeout(() => {
+    inst.q = v;
+    inst.offset = 0;
+    refreshInstalls();
+  }, 250);
+});
+
+initAdminShell();
+</script>
+</body>
+</html>
