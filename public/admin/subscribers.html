@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect Admin — Subscribers</title>
+<!-- Release-notes subscribers from the website's download page
+     (POST /v1/subscribe). Each row is one email address, given for one
+     purpose: one email per release. Sending is manual (the operator's mail
+     client, BCC or a merge) — this page is the list, plus the per-address
+     unsubscribe link every release email must carry. -->
+<link rel="stylesheet" href="/admin/assets/shared.css">
+</head>
+<body>
+
+<div id="dash" class="hidden">
+  <p class="privacy-note">
+    People who asked for release notes on anjadhe.ai. The promise on the form was
+    <b>"no account, no tracking, one email per release, unsubscribe anytime"</b> — send nothing
+    else to this list. Every release email must carry the recipient's own unsubscribe link
+    (the CSV has one per row); opening it deletes the address.
+  </p>
+
+  <div class="row" id="sub-tools">
+    <button id="sub-copy">Copy all addresses</button>
+    <button id="sub-csv">Download CSV (email, unsubscribe link)</button>
+    <span id="sub-count" class="muted"></span>
+  </div>
+
+  <div class="fb-list" id="sub-list"></div>
+  <div id="sub-empty" class="hidden">No subscribers yet. The form on anjadhe.ai/download lands here.</div>
+</div>
+
+<script>
+'use strict';
+const PAGE = 'subscribers';
+let data = null;
+</script>
+<script src="/admin/assets/shared.js"></script>
+<script>
+'use strict';
+
+const UNSUB_BASE = location.origin + '/v1/unsubscribe?t=';
+
+async function loadPage() {
+  data = await api('/v1/admin/subscribers');
+  render();
+}
+
+function render() {
+  renderClockNote(new Date().toISOString().slice(0, 10), null);
+  const items = data.items;
+  $('#sub-count').textContent = items.length === 1 ? '1 address' : `${fmt(items.length)} addresses`;
+  $('#sub-empty').classList.toggle('hidden', items.length > 0);
+  $('#sub-list').innerHTML = items.map(renderItem).join('');
+  document.querySelectorAll('[data-sub-remove]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm(`Remove ${btn.dataset.subEmail} from the list?`)) return;
+      try {
+        await api('/v1/admin/subscribers/remove', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: parseInt(btn.dataset.subRemove, 10) })
+        });
+        load();
+      } catch (e) { alert('Remove failed: ' + e.message); }
+    });
+  });
+}
+
+function renderItem(s) {
+  const when = new Date(s.created_at);
+  const whenText = isNaN(when) ? s.created_at : when.toLocaleDateString();
+  return `
+    <div class="fb-item">
+      <div class="fb-head">
+        <span class="fb-email"><a href="mailto:${esc(s.email)}">${esc(s.email)}</a></span>
+        <span class="fb-when">#${s.id} · ${esc(whenText)}${s.source ? ' · ' + esc(s.source) : ''}</span>
+        <span class="fb-actions">
+          <a href="${esc(UNSUB_BASE + s.token)}" title="The unsubscribe link this address gets in every release email">unsubscribe link</a>
+          <button data-sub-remove="${s.id}" data-sub-email="${esc(s.email)}">Remove</button>
+        </span>
+      </div>
+    </div>`;
+}
+
+$('#sub-copy').addEventListener('click', async () => {
+  if (!data) return;
+  try {
+    await navigator.clipboard.writeText(data.items.map(s => s.email).join(', '));
+    $('#sub-copy').textContent = 'Copied';
+    setTimeout(() => { $('#sub-copy').textContent = 'Copy all addresses'; }, 1500);
+  } catch (e) { alert('Copy failed: ' + e.message); }
+});
+
+$('#sub-csv').addEventListener('click', () => {
+  if (!data) return;
+  const q = (v) => '"' + String(v).replace(/"/g, '""') + '"';
+  const csv = ['email,unsubscribe_url', ...data.items.map(s => `${q(s.email)},${q(UNSUB_BASE + s.token)}`)].join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+  a.download = `anjadhe-subscribers-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+initAdminShell();
+</script>
+</body>
+</html>
