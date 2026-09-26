@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect Admin — Website</title>
+<!-- nenva.co's own visitor counts (POST /v1/web/events, lib/web.js): daily
+     counters over page, referring site, campaign, country and device, plus
+     unique visitors from a salt that dies each UTC day. No cookies, no IPs,
+     no URLs at rest. Click any breakdown row to filter the page by it. -->
+<link rel="stylesheet" href="/admin/assets/shared.css">
+<style>
+  .web-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 18px; }
+  @media (max-width: 900px) { .web-grid { grid-template-columns: 1fr; } }
+  .web-grid > * { min-width: 0; }
+  .web-grid .wide { grid-column: 1 / -1; }
+  @media (max-width: 640px) { .data-table td.k { max-width: 180px; } }
+  .card h2 { margin-top: 0; }
+  .data-table tr[data-dim] { cursor: pointer; }
+  .data-table tr[data-dim]:hover td { background: var(--color-surface-hover); }
+  .data-table td.k { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .data-table td.k.none { color: var(--ink-3); font-style: italic; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; align-self: center; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 3px 4px 3px 10px; border-radius: 999px; border: 1px solid var(--line-2); background: var(--ground); color: var(--ink); }
+  .chip .dim { color: var(--ink-3); }
+  .chip button { border: 0; background: none; color: var(--ink-3); padding: 0 6px; font-size: 13px; line-height: 1; border-radius: 999px; }
+  .chip button:hover { color: var(--ink); }
+  .funnel .meter-row .top .stat b { color: var(--ink); font-weight: 500; }
+</style>
+</head>
+<body>
+
+<div id="dash" class="hidden">
+  <div id="filters" class="row">
+    <div class="range" id="range-buttons">
+      <button data-days="1">Today</button>
+      <button data-days="7">7 days</button>
+      <button data-days="30" class="on">30 days</button>
+      <button data-days="90">90 days</button>
+    </div>
+    <div class="chips" id="chips"></div>
+  </div>
+
+  <div id="tiles"></div>
+
+  <div class="web-grid">
+    <div class="card chart-card" id="card-visitors">
+      <div class="head"><h2 id="visitors-title">Visitors per day</h2><button data-toggle="visitors">table</button></div>
+      <div class="plot"></div><div class="table-wrap hidden"></div>
+    </div>
+    <div class="card chart-card" id="card-views">
+      <div class="head"><h2>Page views per day</h2><button data-toggle="views">table</button></div>
+      <div class="plot"></div><div class="table-wrap hidden"></div>
+    </div>
+    <div class="card chart-card" id="card-conv">
+      <div class="head"><h2>Downloads and signups per day</h2><button data-toggle="conv">table</button></div>
+      <div class="legend">
+        <span><i style="background:var(--series-1)"></i>download clicks</span>
+        <span><i style="background:var(--series-2)"></i>release-notes signups</span>
+      </div>
+      <div class="plot"></div><div class="table-wrap hidden"></div>
+    </div>
+    <div class="card funnel" id="card-funnel">
+      <h2>Funnel</h2>
+      <div id="funnel"></div>
+    </div>
+
+    <div class="card wide" id="card-path">
+      <h2>Pages</h2>
+      <div class="table-wrap" style="max-height: 360px"></div>
+    </div>
+    <div class="card" id="card-referrer">
+      <h2>Referring sites</h2>
+      <div class="table-wrap"></div>
+    </div>
+    <div class="card" id="card-source">
+      <h2>Campaigns (utm_source)</h2>
+      <div class="table-wrap"></div>
+    </div>
+    <div class="card" id="card-country">
+      <h2>Countries</h2>
+      <div class="table-wrap"></div>
+    </div>
+    <div class="card" id="card-device">
+      <h2>Devices</h2>
+      <div class="table-wrap"></div>
+    </div>
+  </div>
+
+  <div class="privacy-note">No cookies and nothing stored in the visitor's browser. A <b>visitor</b> is a hash of their IP address and browser with a random salt that is deleted at the end of each UTC day: one person is one visitor per day, and cannot be followed from one day to the next. <b>Arrived</b> counts visitors whose first page of the day matched the row, which is how a referring site or campaign gets credit. Visitors who send Do Not Track or Global Privacy Control are not counted at all, and neither are crawlers or link previews.</div>
+</div>
+
+<script>
+'use strict';
+const PAGE = 'website';
+const DIMS = ['path', 'referrer', 'source', 'country', 'device'];
+const DIM_LABEL = { path: 'Page', referrer: 'From', source: 'Campaign', country: 'Country', device: 'Device' };
+let report = null;
+// Filters live in the URL, so a filtered view can be linked and reloaded.
+const filters = {};
+for (const [k, v] of new URLSearchParams(location.search)) if (DIMS.includes(k)) filters[k] = v;
+</script>
+<script src="/admin/assets/shared.js"></script>
+<script>
+'use strict';
+
+const regionNames = (() => { try { return new Intl.DisplayNames(['en'], { type: 'region' }); } catch { return null; } })();
+
+function display(dim, v) {
+  if (v === '') return { text: { path: '(none)', referrer: 'Direct or unknown', source: '(none)', country: 'Unknown', device: 'Unknown' }[dim], none: true };
+  if (dim === 'country') return { text: (regionNames && regionNames.of(v)) ? `${regionNames.of(v)} (${v})` : v };
+  return { text: v };
+}
+
+function query() {
+  const p = new URLSearchParams({ days: String(rangeDays) });
+  for (const [k, v] of Object.entries(filters)) p.set(k, v);
+  return p.toString();
+}
+
+function syncUrl() {
+  const p = new URLSearchParams(filters);
+  history.replaceState(null, '', location.pathname + (p.toString() ? '?' + p : ''));
+}
+
+async function loadPage() {
+  report = await api('/v1/admin/web?' + query());
+  render();
+}
+
+const filtered = () => Object.keys(filters).length > 0;
+
+function render() {
+  renderClockNote(report.day, null);
+  renderChips();
+  renderTiles();
+  renderCharts();
+  renderFunnel();
+  for (const dim of DIMS) renderBreakdown(dim);
+}
+
+function renderChips() {
+  const el = $('#chips');
+  el.innerHTML = Object.entries(filters).map(([k, v]) =>
+    `<span class="chip"><span class="dim">${esc(DIM_LABEL[k])}</span>${esc(display(k, v).text)}`
+    + `<button data-clear="${esc(k)}" title="Remove this filter" aria-label="Remove filter">&times;</button></span>`
+  ).join('') || '<span class="muted">Click any row below to filter by it.</span>';
+  el.querySelectorAll('[data-clear]').forEach((b) => b.addEventListener('click', () => {
+    delete filters[b.dataset.clear];
+    syncUrl();
+    load();
+  }));
+}
+
+function renderTiles() {
+  const t = report.totals || {};
+  const u = report.uniques;
+  const tiles = u ? [
+    { label: 'Visitors', value: fmt(u.funnel.visitors), note: `${fmt(u.today)} today` },
+    { label: 'Page views', value: fmt(t.views || 0), note: u.funnel.visitors ? `${((t.views || 0) / u.funnel.visitors).toFixed(1)} per visitor` : '' },
+    { label: 'Download clicks', value: fmt(t.downloads || 0), note: `${fmt(u.funnel.downloaded)} visitors` },
+    { label: 'Download rate', value: u.funnel.visitors ? (100 * u.funnel.downloaded / u.funnel.visitors).toFixed(1) + '%' : '–', note: 'visitors who clicked Download' },
+    { label: 'Release-notes signups', value: fmt(t.signups || 0) }
+  ] : [
+    // A filter narrows the counters, never the salted uniques — say so.
+    { label: 'Arrived', value: fmt(t.entries || 0), note: 'first page of the day matched' },
+    { label: 'Page views', value: fmt(t.views || 0) },
+    { label: 'Download clicks', value: fmt(t.downloads || 0) },
+    { label: 'Release-notes signups', value: fmt(t.signups || 0) }
+  ];
+  $('#tiles').innerHTML = tiles.map(x =>
+    `<div class="tile"><div class="value">${x.value}</div><div class="label">${x.label}</div>${x.note ? `<div class="note">${esc(x.note)}</div>` : ''}</div>`
+  ).join('');
+}
+
+function renderCharts() {
+  const days = dayList(report.day);
+  const byDay = {};
+  for (const r of report.daily) byDay[r.day] = { views: r.views, entries: r.entries, downloads: r.downloads, signups: r.signups };
+  const u = report.uniques;
+  for (const d of days) {
+    byDay[d] = byDay[d] || {};
+    byDay[d].visitors = u ? (u.byDay[d] || 0) : (byDay[d].entries || 0);
+  }
+  $('#visitors-title').textContent = u ? 'Visitors per day' : 'Arrived per day (filtered)';
+  const one = (card, name, label) => {
+    columnChart($(`${card} .plot`), days, [{ name, label, color: 'var(--series-1)' }], byDay);
+    dataTable($(`${card} .table-wrap`), ['Day', label], days.map(d => [d, fmt(byDay[d][name] || 0)]).reverse());
+  };
+  one('#card-visitors', 'visitors', u ? 'visitors' : 'arrived');
+  one('#card-views', 'views', 'views');
+  columnChart($('#card-conv .plot'), days, [
+    { name: 'downloads', label: 'download clicks', color: 'var(--series-1)' },
+    { name: 'signups', label: 'signups', color: 'var(--series-2)' }
+  ], byDay);
+  dataTable($('#card-conv .table-wrap'), ['Day', 'Downloads', 'Signups'],
+    days.map(d => [d, fmt(byDay[d].downloads || 0), fmt(byDay[d].signups || 0)]).reverse());
+}
+
+function renderFunnel() {
+  const u = report.uniques;
+  if (!u) {
+    $('#funnel').innerHTML = '<div class="muted">The funnel counts unique visitors, which are only kept service-wide. Clear the filters to see it.</div>';
+    return;
+  }
+  const f = u.funnel;
+  const steps = [
+    ['Visited the site', f.visitors],
+    ['Opened the download page', f.downloadPage],
+    ['Clicked Download', f.downloaded],
+    ['Signed up for release notes', f.signedUp]
+  ];
+  $('#funnel').innerHTML = steps.map(([label, n]) => {
+    const pct = f.visitors ? 100 * n / f.visitors : 0;
+    return `<div class="meter-row"><div class="top"><span>${esc(label)}</span>`
+      + `<span class="stat"><b>${fmt(n)}</b> &middot; ${pct.toFixed(pct && pct < 10 ? 1 : 0)}%</span></div>`
+      + `<div class="meter"><div class="fill" style="width:${Math.min(100, pct).toFixed(1)}%; background:var(--series-1)"></div></div></div>`;
+  }).join('') + '<div class="note">Visitor-days in the range: a person who comes back on three days counts three times.</div>';
+}
+
+function renderBreakdown(dim) {
+  const rows = report.breakdowns[dim] || [];
+  const mount = $(`#card-${dim} .table-wrap`);
+  const pages = dim === 'path' && report.uniques ? report.uniques.pages : null;
+  const head = dim === 'path'
+    ? ['Page', 'Views', ...(pages ? ['Visitors'] : []), 'Arrived', 'Downloads', 'Signups']
+    : [DIM_LABEL[dim], 'Arrived', 'Views', 'Downloads'];
+  if (!rows.length) {
+    mount.innerHTML = `<table class="data-table"><tr><td class="table-empty">Nothing in this range.</td></tr></table>`;
+    return;
+  }
+  const body = rows.map((r) => {
+    const d = display(dim, r.value);
+    const cells = dim === 'path'
+      ? [fmt(r.views), ...(pages ? [fmt(pages[r.value] || 0)] : []), fmt(r.entries), fmt(r.downloads), fmt(r.signups)]
+      : [fmt(r.entries), fmt(r.views), fmt(r.downloads)];
+    const active = Object.hasOwn(filters, dim) && filters[dim] === r.value;
+    return `<tr data-dim="${dim}" data-val="${esc(r.value)}"${active ? ' class="sel"' : ''}>`
+      + `<td class="k${d.none ? ' none' : ''}" title="${esc(d.text)}">${esc(d.text)}</td>`
+      + cells.map(c => `<td>${c}</td>`).join('') + '</tr>';
+  }).join('');
+  mount.innerHTML = `<table class="data-table"><tr>${head.map(h => `<th>${esc(h)}</th>`).join('')}</tr>${body}</table>`;
+  mount.querySelectorAll('tr[data-dim]').forEach((tr) => tr.addEventListener('click', () => {
+    if (filters[tr.dataset.dim] === tr.dataset.val) delete filters[tr.dataset.dim];
+    else filters[tr.dataset.dim] = tr.dataset.val;
+    syncUrl();
+    load();
+  }));
+}
+
+initAdminShell();
+</script>
+</body>
+</html>
