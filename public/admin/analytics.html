@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect Admin — Analytics</title>
+<!-- Opt-in app analytics: daily events, top counters, and the install × day
+     grid with its per-install drill-down. Counters only — hashed ids, UTC
+     days, numbers. -->
+<link rel="stylesheet" href="/admin/assets/shared.css">
+</head>
+<body>
+
+<div id="dash" class="hidden">
+  <div id="filters" class="row">
+    <div class="range" id="range-buttons">
+      <button data-days="7">7 days</button>
+      <button data-days="30" class="on">30 days</button>
+      <button data-days="90">90 days</button>
+    </div>
+  </div>
+
+  <div id="tiles"></div>
+
+  <div id="charts">
+    <div class="card chart-card" id="card-analytics">
+      <div class="head"><h2>App events per day</h2><button data-toggle="analytics">table</button></div>
+      <div class="plot"></div><div class="table-wrap hidden"></div>
+    </div>
+    <div class="card chart-card" id="card-top">
+      <div class="head"><h2>Top events in range</h2></div>
+      <div class="table-wrap" style="max-height: 230px"></div>
+    </div>
+  </div>
+
+  <div class="card" id="analytics-installs-card" style="margin-bottom:18px">
+    <div class="head row" style="justify-content:space-between; margin-bottom:6px">
+      <h2 style="margin:0">App events per install, per day</h2>
+      <span class="sub" id="ai-note"></span>
+    </div>
+    <div class="privacy-note">Ids are stored as SHA-256 hashes &mdash; the service never keeps raw machine identifiers. Since 2026-09-17 the app has <b>one id per Mac</b>, so this is the same id the Installs page uses: paste a hash (or its first few characters) to find one install, including a quiet one the top-100 grid leaves out. Cells are event counts for one UTC day. Click a row to see which events.</div>
+    <div class="table-toolbar">
+      <input id="ai-filter" type="text" spellcheck="false" autocomplete="off" placeholder="Filter by hash prefix&hellip;">
+      <div class="spacer"></div>
+      <span class="sub" id="ai-filter-note"></span>
+    </div>
+    <div class="grid-wrap"><table id="ai-grid"></table></div>
+    <div id="ai-empty" class="hidden">No app analytics in this range. The feature is off by default in the app.</div>
+    <div id="ai-detail" class="hidden"></div>
+  </div>
+</div>
+
+<script>
+'use strict';
+const PAGE = 'analytics';
+let overview = null;
+let analyticsInstalls = null;
+// Deep link from the feedback page: ?install=<hash> opens that install's
+// drill-down on load, even when it has no events in the current range, and
+// seeds the filter so the grid shows that one row rather than the top 100.
+// ?q=<prefix> filters without opening anything.
+const _p = new URLSearchParams(location.search);
+let selectedInstall = _p.get('install') || null;
+const _q0 = (_p.get('q') || selectedInstall || '').trim().toLowerCase();
+let aiQuery = /^[0-9a-f]{1,64}$/.test(_q0) ? _q0 : '';
+</script>
+<script src="/admin/assets/shared.js"></script>
+<script>
+'use strict';
+
+async function loadPage() {
+  [overview, analyticsInstalls] = await Promise.all([
+    api('/v1/admin/overview?days=' + rangeDays),
+    api('/v1/admin/analytics?days=' + rangeDays + (aiQuery ? '&q=' + encodeURIComponent(aiQuery) : ''))
+  ]);
+  render();
+}
+
+function render() {
+  renderClockNote(overview.day, null);
+  navFeedbackBadge(overview.feedback?.new || 0);
+  renderTiles();
+  renderAnalytics();
+  renderAnalyticsInstalls();
+}
+
+function renderTiles() {
+  const a = overview.analytics?.actives || {};
+  const tiles = [
+    { label: 'Analytics installs today', value: fmt(a.today ?? 0) },
+    { label: 'Last 7 days', value: fmt(a.last7d ?? 0) },
+    { label: 'Last 30 days', value: fmt(a.last30d ?? 0) },
+    // With a filter on, this counts what MATCHED — say so, or it reads as
+    // "only one install exists".
+    { label: 'Installs in range', value: fmt(analyticsInstalls?.installs?.length ?? 0),
+      note: aiQuery ? `matching ${aiQuery.slice(0, 8)}\u2026` : `last ${rangeDays} days` }
+  ];
+  $('#tiles').innerHTML = tiles.map(t =>
+    `<div class="tile"><div class="value">${t.value}</div><div class="label">${t.label}</div>${t.note ? `<div class="note">${t.note}</div>` : ''}</div>`
+  ).join('');
+}
+
+function renderAnalytics() {
+  const a = overview.analytics || { daily: [], top: [] };
+  const byDay = {};
+  for (const { day, n } of a.daily) byDay[day] = { 'analytics.total': n };
+  columnChart($('#card-analytics .plot'), dayList(overview.day),
+    [{ name: 'analytics.total', label: 'events', color: 'var(--series-1)' }], byDay);
+  dataTable($('#card-analytics .table-wrap'), ['Day', 'Events'],
+    dayList(overview.day).map(d => [d, fmt(byDay[d]?.['analytics.total'] || 0)]).reverse());
+  dataTable($('#card-top .table-wrap'), ['Event', 'Count'],
+    a.top.length ? a.top.map(t => [t.name, fmt(t.n)]) : [['No events in this range', '']]);
+}
+
+function renderAnalyticsInstalls() {
+  const installs = analyticsInstalls?.installs || [];
+  const days = dayList(overview.day).slice().reverse();
+  $('#ai-empty').classList.toggle('hidden', installs.length > 0);
+  $('#ai-empty').textContent = aiQuery
+    ? 'No install matches that prefix in this range. A wider range, or the drill-down below, may still have it.'
+    : 'No app analytics in this range. The feature is off by default in the app.';
+  $('#ai-filter-note').textContent = aiQuery ? `filtered by ${aiQuery.slice(0, 12)}\u2026` : '';
+  $('#ai-note').textContent = installs.length
+    ? `${fmt(installs.length)} install${installs.length === 1 ? '' : 's'} with events in the last ${rangeDays} days`
+    + (installs.length >= (analyticsInstalls.limit || 0) ? ' (capped)' : '')
+    : '';
+  if (!installs.length) {
+    $('#ai-grid').innerHTML = '';
+    if (selectedInstall) openInstallDetail(selectedInstall); else closeInstallDetail();
+    return;
+  }
+  const max = Math.max(1, ...installs.flatMap(i => Object.values(i.byDay)));
+  const head = `<thead><tr><th class="idcol">Install</th><th>Total</th><th>Days</th>`
+    + days.map(d => `<th>${d.slice(5)}</th>`).join('') + '</tr></thead>';
+  const body = installs.map(i => {
+    const cells = days.map(d => {
+      const n = i.byDay[d] || 0;
+      if (!n) return `<td class="zero">&middot;</td>`;
+      const pct = 8 + 40 * (n / max);
+      return `<td style="background:color-mix(in srgb, var(--series-1) ${pct.toFixed(0)}%, transparent)">${fmt(n)}</td>`;
+    }).join('');
+    return `<tr data-install="${esc(i.installId)}" class="${i.installId === selectedInstall ? 'sel' : ''}">`
+      + `<td class="idcol install-id">${esc(i.installId.slice(0, 12))}&hellip;</td>`
+      + `<td class="total">${fmt(i.total)}</td><td>${fmt(i.activeDays)}</td>${cells}</tr>`;
+  }).join('');
+  $('#ai-grid').innerHTML = head + '<tbody>' + body + '</tbody>';
+  $('#ai-grid').querySelectorAll('tbody tr').forEach((tr) => {
+    tr.addEventListener('click', () => {
+      const id = tr.dataset.install;
+      if (id === selectedInstall) closeInstallDetail(); else openInstallDetail(id);
+    });
+  });
+  // A selected install stays open even when the grid's range excludes it —
+  // the deep-linked drill-down still answers with its own range query.
+  if (selectedInstall) openInstallDetail(selectedInstall);
+}
+
+function closeInstallDetail() {
+  selectedInstall = null;
+  $('#ai-detail').classList.add('hidden');
+  $('#ai-detail').innerHTML = '';
+  $('#ai-grid').querySelectorAll('tr.sel').forEach(tr => tr.classList.remove('sel'));
+}
+
+async function openInstallDetail(id) {
+  selectedInstall = id;
+  $('#ai-grid').querySelectorAll('tbody tr').forEach(tr =>
+    tr.classList.toggle('sel', tr.dataset.install === id));
+  let detail;
+  try {
+    detail = await api(`/v1/admin/analytics/install?id=${encodeURIComponent(id)}&days=${rangeDays}`);
+  } catch { return; }
+  if (selectedInstall !== id) return; // a later click won the race
+  const box = $('#ai-detail');
+  const byDay = {};
+  for (const [d, n] of Object.entries(detail.byDay)) byDay[d] = { 'events': n };
+  let last = null;
+  const rows = detail.events.map((e) => {
+    const newDay = e.day !== last;
+    last = e.day;
+    return `<tr class="${newDay ? 'day-start' : ''}"><td>${newDay ? e.day : ''}</td>`
+      + `<td class="ev">${esc(e.name)}</td><td>${fmt(e.n)}</td></tr>`;
+  }).join('');
+  box.innerHTML = `
+    <div class="detail-head">
+      <b>Install <span class="install-id">${esc(id.slice(0, 16))}&hellip;</span></b>
+      <span class="sub">${fmt(detail.total)} events over ${fmt(Object.keys(detail.byDay).length)} active days</span>
+      <div style="flex:1"></div>
+      <button id="ai-copy">copy full id</button>
+      <button id="ai-close">close</button>
+    </div>
+    <div class="cols">
+      <div class="plot"></div>
+      <div class="table-wrap" style="max-height:260px">
+        <table class="data-table"><tr><th>Day (UTC)</th><th>Event</th><th>Count</th></tr>${rows}</table>
+      </div>
+    </div>`;
+  box.classList.remove('hidden');
+  columnChart($('.plot', box), dayList(overview.day),
+    [{ name: 'events', label: 'events', color: 'var(--series-1)' }], byDay);
+  $('#ai-close').addEventListener('click', closeInstallDetail);
+  $('#ai-copy').addEventListener('click', (e) => {
+    navigator.clipboard.writeText(id);
+    e.target.textContent = 'copied';
+    setTimeout(() => { e.target.textContent = 'copy full id'; }, 800);
+  });
+}
+
+// Same affordance as the Installs page: hex only, debounced, refetches
+// because the grid is a server-side top-N — filtering the rows we were handed
+// could never surface an install the server left out.
+if (aiQuery) $('#ai-filter').value = aiQuery;
+let aiFilterTimer = null;
+$('#ai-filter').addEventListener('input', () => {
+  const el = $('#ai-filter');
+  const v = el.value.trim().toLowerCase();
+  const ok = v === '' || /^[0-9a-f]{1,64}$/.test(v);
+  el.classList.toggle('bad', !ok);
+  if (!ok) return;
+  clearTimeout(aiFilterTimer);
+  aiFilterTimer = setTimeout(async () => {
+    aiQuery = v;
+    try {
+      analyticsInstalls = await api('/v1/admin/analytics?days=' + rangeDays
+        + (aiQuery ? '&q=' + encodeURIComponent(aiQuery) : ''));
+    } catch { return; }
+    // A full hash typed in is a lookup, not a filter: open it.
+    if (/^[0-9a-f]{64}$/.test(aiQuery)) selectedInstall = aiQuery;
+    renderTiles();
+    renderAnalyticsInstalls();
+  }, 250);
+});
+
+initAdminShell();
+</script>
+</body>
+</html>
