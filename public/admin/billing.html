@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect Admin — Billing</title>
+<!-- Billing phase P1 (anjadhe-app docs/BILLING.md): what the service costs,
+     measured before anything is charged (law B1). Every number is a count or
+     a cost; owners are hash prefixes; nothing here limits anyone. Model
+     rates are set on Models, search rates by PROVIDER_PRICES. -->
+<link rel="stylesheet" href="/admin/assets/shared.css">
+</head>
+<body>
+
+<div id="dash" class="hidden">
+  <p class="privacy-note">
+    What this month cost to serve, from the cost meters: AI by model and by
+    <b>chat</b> or <b>background</b>, searches by provider, and cost per plan.
+    Costs use each model's rate on <a href="/admin/models">Models</a> (a model with no rate counts as $0)
+    and the per-search prices below. Hosting is not included. Report only: it limits nobody.
+  </p>
+
+  <div class="row">
+    <label class="muted" for="period">Month</label>
+    <input id="period" type="month">
+    <span id="bill-total" class="muted"></span>
+  </div>
+
+  <div class="card"><h2>Revenue and margin</h2>
+    <div class="table-wrap"><table class="data-table" id="t-rev"></table></div>
+    <p class="muted" id="margin-note"></p></div>
+
+  <div class="card"><h2>Plans, trials and top-ups</h2>
+    <div class="table-wrap"><table class="data-table" id="t-plans"></table></div>
+    <p class="muted" id="trial-note"></p></div>
+
+  <div class="card"><h2>AI by model and purpose</h2>
+    <div class="table-wrap"><table class="data-table" id="t-llm"></table></div>
+    <p class="muted" id="llm-note"></p></div>
+
+  <div class="card"><h2>Searches by provider</h2>
+    <div class="table-wrap"><table class="data-table" id="t-search"></table></div></div>
+
+  <div class="card"><h2>By plan</h2>
+    <div class="table-wrap"><table class="data-table" id="t-tier"></table></div>
+    <p class="muted">Average cost per owner is what a plan's price has to cover, before hosting and card fees.</p></div>
+
+  <div class="card"><h2>Costliest owners</h2>
+    <div class="table-wrap"><table class="data-table" id="t-top"></table></div></div>
+
+  <div class="card"><h2>Rates in use</h2>
+    <div class="table-wrap"><table class="data-table" id="t-rates"></table></div></div>
+</div>
+
+<script>
+'use strict';
+const PAGE = 'billing';
+let data = null;
+</script>
+<script src="/admin/assets/shared.js"></script>
+<script>
+'use strict';
+
+// Micro-dollars to a readable amount: cents show under $1.
+const usd = (micros) => {
+  const d = (micros || 0) / 1e6;
+  return d === 0 ? '$0' : d < 0.01 ? '<$0.01' : '$' + d.toFixed(d < 10 ? 2 : 0);
+};
+const table = (el, head, rows) => {
+  $(el).innerHTML = `<thead><tr>${head.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead>` +
+    `<tbody>${rows.length ? rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')
+      : `<tr><td colspan="${head.length}" class="muted">Nothing metered this month yet.</td></tr>`}</tbody>`;
+};
+
+async function loadPage() {
+  const p = $('#period').value;
+  data = await api('/v1/admin/billing' + (p ? '?period=' + encodeURIComponent(p) : ''));
+  if (!$('#period').value) $('#period').value = data.period;
+  render();
+}
+
+function render() {
+  renderClockNote(new Date().toISOString().slice(0, 10), null);
+  const aiTotal = data.llm.reduce((s, r) => s + r.cost_micros, 0);
+  const searchTotal = data.search.reduce((s, r) => s + r.cost_micros, 0);
+  $('#bill-total').textContent = `${data.period}: AI ${usd(aiTotal)} · search ${usd(searchTotal)} · total ${usd(aiTotal + searchTotal)}`;
+
+  const money = (cents, cur) => (cents < 0 ? '−' : '') + (cur === 'usd' ? '$' : cur.toUpperCase() + ' ') + (Math.abs(cents) / 100).toFixed(2);
+  table('#t-rev', ['Plan', 'Kind', 'Payments', 'Amount'],
+    data.revenue.map(x => [esc(x.plan), esc(x.kind), fmt(x.n), money(x.cents, x.currency)]));
+  const usdCents = data.revenue.filter(x => x.currency === 'usd').reduce((s, x) => s + x.cents, 0);
+  const costCents = (aiTotal + searchTotal) / 1e4;
+  $('#margin-note').textContent = usdCents
+    ? `Net revenue ${money(usdCents, 'usd')}; AI and search cost ${usd(aiTotal + searchTotal)}; margin before hosting and card fees ${money(Math.round(usdCents - costCents), 'usd')}${usdCents > 0 ? ` (${Math.round(100 * (usdCents - costCents) / usdCents)}%)` : ''}.`
+    : 'No revenue recorded this month.';
+  table('#t-plans', ['Plan', 'Status', 'Codes'], data.plans.map(x => [esc(x.plan), esc(x.status), fmt(x.n)]));
+  $('#trial-note').textContent = `Trials: ${fmt(data.trials.n || 0)} started, ${fmt(data.trials.active || 0)} active. ` +
+    `Top-ups outstanding: ${fmt(data.topups.n || 0)} packs, ${fmt(data.topups.searches || 0)} searches and ${fmt(data.topups.tokens || 0)} tokens left.`;
+
+  table('#t-llm', ['Model', 'Purpose', 'Requests', 'Tokens in', 'Tokens out', 'Cost', 'Estimated'],
+    data.llm.map(r => [esc(r.model), esc(r.work), fmt(r.requests), fmt(r.tokens_in), fmt(r.tokens_out), usd(r.cost_micros), fmt(r.estimated)]));
+  const est = data.llm.reduce((s, r) => s + r.estimated, 0), req = data.llm.reduce((s, r) => s + r.requests, 0);
+  $('#llm-note').textContent = req ? `${(100 * est / req).toFixed(1)}% of requests were estimated (the client left before the usage arrived).` : '';
+
+  table('#t-search', ['Provider', 'Searches', 'Cost', 'Price per 1,000'],
+    data.search.map(r => [esc(r.provider), fmt(r.searches), usd(r.cost_micros), usd((data.providerPrices[r.provider] || 0) * 1000)]));
+
+  table('#t-tier', ['Plan', 'Owners', 'AI cost', 'of which background', 'Search cost', 'Average per owner'],
+    Object.entries(data.byTier).map(([tier, t]) => [esc(tier), fmt(t.owners), usd(t.ai_micros), usd(t.background_micros),
+      usd(t.search_micros), usd((t.ai_micros + t.search_micros) / Math.max(1, t.owners))]));
+
+  table('#t-top', ['Owner', 'Plan', 'AI requests', 'AI cost', 'Background', 'Searches', 'Search cost', 'Total'],
+    data.top.map(o => [`<code>${esc(o.owner)}</code>`, esc(o.tier), fmt(o.requests), usd(o.ai_micros), usd(o.background_micros),
+      fmt(o.searches), usd(o.search_micros), usd(o.total_micros)]));
+
+  table('#t-rates', ['Model', 'US$ per million in', 'US$ per million out', 'Rate version'],
+    data.models.map(m => [esc(m.id), m.priceIn ? esc(String(m.priceIn)) : '<span class="muted">not set</span>',
+      m.priceOut ? esc(String(m.priceOut)) : '<span class="muted">not set</span>', fmt(m.rateVersion)]));
+}
+
+$('#period').addEventListener('change', () => load());
+
+initAdminShell();
+</script>
+</body>
+</html>
