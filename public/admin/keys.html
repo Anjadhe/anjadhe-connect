@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect Admin — Keys</title>
+<!-- Named keys (2026-10-09): keys the operator mints by hand for a job of
+     their own (an eval run, a script) and names, so the job's usage can be
+     told apart. A key is shown ONCE, when it is made; only its hash is
+     stored. Usage is the cost meters every key writes: requests, tokens and
+     cost per model and kind of work, this month and last. Revoke stops the
+     key and keeps its numbers. A named key is a test install, so it is
+     never counted as a real one. -->
+<link rel="stylesheet" href="/admin/assets/shared.css">
+<style>
+  .nk-usage { margin-top: 10px; }
+  .nk-usage table { width: 100%; }
+  .nk-total { font-variant-numeric: tabular-nums; }
+  .nk-revoked { color: var(--ink-3); }
+</style>
+</head>
+<body>
+
+<div id="dash" class="hidden">
+  <p class="privacy-note" id="nk-note"></p>
+
+  <div class="card" id="nk-form-card">
+    <h2>Create a key</h2>
+    <div class="lic-form">
+      <label>Name
+        <input id="nk-label" type="text" maxlength="80" placeholder="coach eval, cloud lite" autocomplete="off">
+        <span class="sub">What the key is for. Its usage is tracked under this name.</span>
+      </label>
+      <label>Tier
+        <select id="nk-tier"></select>
+        <span class="sub">The limits it runs under, like an install on that plan.</span>
+      </label>
+      <div class="row">
+        <div class="spacer"></div>
+        <button id="nk-create" class="primary">Create</button>
+      </div>
+      <div class="err" id="nk-err"></div>
+      <div class="lic-minted" id="nk-minted"></div>
+    </div>
+  </div>
+
+  <div class="row" id="nk-tools">
+    <span id="nk-count" class="muted"></span>
+  </div>
+  <div class="fb-list" id="nk-list"></div>
+  <div id="nk-empty" class="hidden muted">No named keys yet.</div>
+</div>
+
+<script>
+'use strict';
+const PAGE = 'keys';
+let data = null;
+</script>
+<script src="/admin/assets/shared.js"></script>
+<script>
+'use strict';
+
+const dollars = (micros) => '$' + (Number(micros || 0) / 1e6).toFixed(micros >= 1e6 ? 2 : 4);
+
+async function loadPage() {
+  data = await api('/v1/admin/keys');
+  render();
+}
+
+function totals(rows) {
+  return rows.reduce((t, r) => ({ requests: t.requests + (r.requests || 0), tokens: t.tokens + (r.tokens_in || 0) + (r.tokens_out || 0), cost: t.cost + (r.cost_micros || 0) }), { requests: 0, tokens: 0, cost: 0 });
+}
+
+function render() {
+  renderClockNote(new Date().toISOString().slice(0, 10), data.period);
+  $('#nk-note').innerHTML = 'Keys you made for your own jobs, by name. A key is shown once, when it is made; copy it then. '
+    + 'Usage comes from the same meters every key writes, so the cost here is what the job cost Connect. Nothing a key sends is stored.';
+  const sel = $('#nk-tier');
+  if (!sel.options.length) sel.innerHTML = data.tiers.map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join('');
+  const items = data.items;
+  const live = items.filter(k => !k.revoked_at).length;
+  $('#nk-count').textContent = `${fmt(items.length)} named key${items.length === 1 ? '' : 's'} · ${fmt(live)} live · usage since ${data.since}`;
+  $('#nk-empty').classList.toggle('hidden', items.length > 0);
+  $('#nk-list').innerHTML = items.map(renderItem).join('');
+  document.querySelectorAll('[data-nk-toggle]').forEach(btn => btn.addEventListener('click', () => btn.closest('.fb-item').classList.toggle('is-open')));
+  document.querySelectorAll('[data-nk-rename]').forEach(btn => btn.addEventListener('click', async () => {
+    const label = prompt('New name for this key', btn.dataset.nkLabel);
+    if (!label || !label.trim()) return;
+    try { await post('/v1/admin/keys/rename', { installId: btn.dataset.nkRename, label }); load(); }
+    catch (e) { toast('Rename failed: ' + e.message, { error: true }); }
+  }));
+  document.querySelectorAll('[data-nk-revoke]').forEach(btn => btn.addEventListener('click', async () => {
+    if (!confirm(`Revoke "${btn.dataset.nkLabel}"? It stops working at once; its usage stays here.`)) return;
+    try { await post('/v1/admin/keys/revoke', { installId: btn.dataset.nkRevoke }); load(); }
+    catch (e) { toast('Revoke failed: ' + e.message, { error: true }); }
+  }));
+}
+
+function renderItem(k) {
+  const thisMonth = k.llm.filter(r => r.period === data.period);
+  const t = totals(thisMonth), all = totals(k.llm);
+  const searches = k.search.reduce((n, r) => n + (r.searches || 0), 0);
+  const when = isNaN(new Date(k.created_at)) ? k.created_at : new Date(k.created_at).toLocaleDateString();
+  const rows = k.llm.map(r => `<tr><td>${esc(r.period)}</td><td>${esc(r.model)}</td><td>${esc(r.work)}</td><td>${fmt(r.requests)}</td><td>${fmt(r.tokens_in)}</td><td>${fmt(r.tokens_out)}</td><td>${dollars(r.cost_micros)}${r.estimated ? ' (est.)' : ''}</td></tr>`).join('');
+  return `
+    <div class="fb-item${k.revoked_at ? ' is-closed' : ''}">
+      <div class="fb-head">
+        <span class="fb-email">${esc(k.label)} <span class="lic-class">${esc(k.tier)}</span>${k.revoked_at ? ' <span class="nk-revoked">revoked</span>' : ''}</span>
+        <span class="fb-when nk-total">this month ${fmt(t.requests)} requests · ${fmt(t.tokens)} tokens · ${dollars(t.cost)}${searches ? ` · ${fmt(searches)} searches` : ''}</span>
+        <span class="fb-actions">
+          <button data-nk-toggle>Usage</button>
+          <button data-nk-rename="${esc(k.install_id)}" data-nk-label="${esc(k.label)}">Rename</button>
+          ${k.revoked_at ? '' : `<button data-nk-revoke="${esc(k.install_id)}" data-nk-label="${esc(k.label)}">Revoke</button>`}
+        </span>
+      </div>
+      <div class="lic-key nk-usage">
+        <div class="muted">Made ${esc(when)}${k.last_seen_day ? ` · last used ${esc(k.last_seen_day)}` : ' · never used'}${k.revoked_at ? ` · revoked ${esc(String(k.revoked_at).slice(0, 10))}` : ''} · since ${esc(data.since)}: ${fmt(all.requests)} requests, ${fmt(all.tokens)} tokens, ${dollars(all.cost)}</div>
+        ${rows ? `<table class="data-table"><tr><th>Month</th><th>Model</th><th>Work</th><th>Requests</th><th>Tokens in</th><th>Tokens out</th><th>Cost</th></tr>${rows}</table>` : '<div class="muted">No model calls yet.</div>'}
+      </div>
+    </div>`;
+}
+
+function post(path, body) {
+  return api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+}
+
+$('#nk-create').addEventListener('click', async () => {
+  const err = $('#nk-err'); err.textContent = '';
+  const out = $('#nk-minted'); out.textContent = '';
+  try {
+    const r = await post('/v1/admin/keys', { label: $('#nk-label').value.trim(), tier: $('#nk-tier').value });
+    out.innerHTML = `<span>"${esc(r.item.label)}": ${esc(r.apiKey)} (shown once; copy it now)</span><button type="button" id="nk-copy-new">Copy</button>`;
+    $('#nk-copy-new').addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(r.apiKey); toast('Key copied.'); } catch (e2) { toast('Copy failed: ' + e2.message, { error: true }); }
+    });
+    $('#nk-label').value = '';
+    load();
+  } catch (e) { err.textContent = e.message; }
+});
+
+initAdminShell();
+</script>
+</body>
+</html>
